@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { ArrowLeft, Bot, RotateCcw, Send, X } from 'lucide-react';
+import { ArrowLeft, RotateCcw, Send, Square, X, Zap } from 'lucide-react';
 import { t } from '../lib/i18n';
 import { playIncomingTone, playSentPop, unlockAudioNow } from '../lib/sound';
 import { AppLanguage, GeminiChatTurn, ReactionEmoji } from '../types/chat';
+import { GeminiLogo } from './GeminiLogo';
 import { AggregatedReaction, MessageBubble } from './MessageBubble';
 
 interface Props {
@@ -13,34 +14,49 @@ interface Props {
 }
 
 type RolePreset = 'assistant' | 'translator' | 'tutor';
-type ModelChoice = 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+type ModelChoice = 'gemini-3.1-flash-lite' | 'gemini-4-hydrogen';
 
 export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) => {
   const [rolePreset, setRolePreset] = useState<RolePreset>('assistant');
-  const [modelChoice, setModelChoice] = useState<ModelChoice>('gemini-4-hydrogen');
+  const [modelChoice, setModelChoice] = useState<ModelChoice>('gemini-3.1-flash-lite');
   const [turns, setTurns] = useState<GeminiChatTurn[]>([
     {
       id: 'welcome',
       role: 'model',
       text:
         lang === 'bn'
-          ? `হ্যালো ${userName}! আমি KothaLink Gemini Assistant। আপনি আমাকে মেসেজ লিখতে, বাংলা-ইংরেজি অনুবাদ করতে বা যেকোনো প্রশ্ন করতে পারেন।`
-          : `Hi ${userName}! I'm your KothaLink Gemini Assistant. Ask me anything, draft messages in English or Bangla/Banglish, or pick a mode above.`,
+          ? `হ্যালো ${userName}! আমি KothaLink Gemini AI। এখন আগের চেয়ে অনেক দ্রুত রিয়েল-টাইমে উত্তর দেই — মেসেজ লেখা, বাংলা/ইংরেজি অনুবাদ বা যেকোনো প্রশ্ন করুন।`
+          : `Hi ${userName}! I'm KothaLink Gemini AI with real-time fast streaming. Ask me anything, translate Bangla/English/Banglish, or polish a message instantly.`,
       timestamp: Date.now(),
-      model: 'gemini-4-hydrogen',
+      model: 'gemini-3.1-flash-lite',
       reactions: {},
     },
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [sendPulseKey, setSendPulseKey] = useState(0);
 
   const endRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [turns, loading]);
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  const stopGeneration = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setLoading(false);
+    setStreamingTurnId(null);
+  };
 
   const handleSend = async (e?: React.FormEvent, overrideText?: string) => {
     e?.preventDefault();
@@ -60,16 +76,21 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
     };
 
     const historyPayload = turns
-      .filter((item) => item.id !== 'welcome')
+      .filter((item) => item.id !== 'welcome' && item.text.trim().length > 0)
       .map((item) => ({ role: item.role, text: item.text }));
 
+    const aiTurnId = `m_${Date.now() + 1}`;
     setTurns((prev) => [...prev, userTurn]);
     setSendPulseKey((k) => k + 1);
-    playSentPop();
+    void playSentPop();
     setLoading(true);
+    setStreamingTurnId(null);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
-      const res = await fetch('/api/gemini/chat', {
+      const res = await fetch('/api/gemini/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -78,26 +99,131 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
           rolePreset,
           modelChoice,
         }),
+        signal: controller.signal,
       });
-      const data = (await res.json()) as { reply?: string; model?: string; error?: string };
-      if (!res.ok) {
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        throw new Error(
+          lang === 'bn'
+            ? 'এই হোস্টিং-এ ব্যাকএন্ড (/api/gemini) সক্রিয় নেই। AI চ্যাট চালাতে Cloud Run / App Hosting বা Shared App লিংক ব্যবহার করুন।'
+            : 'Gemini backend (/api/gemini) is not active on static Firebase Hosting. Run via server.ts / Cloud Run or the Shared App URL.'
+        );
+      }
+      if (!res.ok || !res.body || contentType.includes('application/json')) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string; reply?: string };
         throw new Error(data.error || 'Gemini request failed.');
       }
 
-      const aiTurn: GeminiChatTurn = {
-        id: `m_${Date.now()}`,
-        role: 'model',
-        text: data.reply || 'No response received.',
-        timestamp: Date.now(),
-        model: data.model || modelChoice,
-        reactions: {},
-      };
-      setTurns((prev) => [...prev, aiTurn]);
-      playIncomingTone();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+      let accumulated = '';
+      let createdBubble = false;
+      let resolvedModel = modelChoice;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() ?? '';
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith('data:')) continue;
+          const jsonStr = line.slice(5).trim();
+          if (!jsonStr) continue;
+
+          let parsed: { delta?: string; done?: boolean; error?: string; model?: string };
+          try {
+            parsed = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+
+          if (parsed.error) {
+            throw new Error(parsed.error);
+          }
+          if (parsed.model) {
+            resolvedModel = parsed.model as ModelChoice;
+          }
+          if (parsed.delta) {
+            accumulated += parsed.delta;
+            if (!createdBubble) {
+              createdBubble = true;
+              setStreamingTurnId(aiTurnId);
+              const firstTurn: GeminiChatTurn = {
+                id: aiTurnId,
+                role: 'model',
+                text: accumulated,
+                timestamp: Date.now(),
+                model: resolvedModel,
+                reactions: {},
+              };
+              setTurns((prev) => [...prev, firstTurn]);
+            } else {
+              const latestText = accumulated;
+              setTurns((prev) =>
+                prev.map((turn) => (turn.id === aiTurnId ? { ...turn, text: latestText } : turn))
+              );
+            }
+          }
+        }
+      }
+
+      if (!createdBubble && !accumulated.trim()) {
+        // Safety fallback to non-streaming endpoint if proxy stripped SSE chunks
+        const fallbackRes = await fetch('/api/gemini/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: prompt,
+            history: historyPayload,
+            rolePreset,
+            modelChoice,
+          }),
+          signal: controller.signal,
+        });
+        const fallbackData = (await fallbackRes.json().catch(() => ({}))) as {
+          error?: string;
+          reply?: string;
+          model?: string;
+        };
+        if (!fallbackRes.ok) {
+          throw new Error(fallbackData.error || 'Gemini request failed.');
+        }
+        const fallbackTurn: GeminiChatTurn = {
+          id: aiTurnId,
+          role: 'model',
+          text: (fallbackData.reply || '').trim() || 'No response received.',
+          timestamp: Date.now(),
+          model: (fallbackData.model as ModelChoice) || resolvedModel,
+          reactions: {},
+        };
+        setTurns((prev) => [...prev, fallbackTurn]);
+      } else if (!createdBubble) {
+        const fallbackTurn: GeminiChatTurn = {
+          id: aiTurnId,
+          role: 'model',
+          text: accumulated.trim(),
+          timestamp: Date.now(),
+          model: resolvedModel,
+          reactions: {},
+        };
+        setTurns((prev) => [...prev, fallbackTurn]);
+      }
+
+      void playIncomingTone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to reach Gemini assistant.');
+      if ((err as { name?: string })?.name !== 'AbortError') {
+        setError(err instanceof Error ? err.message : 'Unable to reach Gemini AI.');
+      }
     } finally {
+      abortControllerRef.current = null;
       setLoading(false);
+      setStreamingTurnId(null);
     }
   };
 
@@ -117,6 +243,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
   };
 
   const resetChat = () => {
+    stopGeneration();
     setError('');
     setTurns([
       {
@@ -133,30 +260,50 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
     ]);
   };
 
+  const suggestions =
+    lang === 'bn'
+      ? [
+          'বন্ধুকে সুন্দর একটা মেসেজ লিখে দাও',
+          '"আমি ১০ মিনিটে পৌঁছাব" ইংরেজিতে বলো',
+          'সহজ ভাষায় AI কীভাবে কাজ করে বলো',
+        ]
+      : [
+          'Write a polite message to my friend in Banglish',
+          'Translate "I will reach in 10 minutes" to Bangla',
+          'Suggest 3 warm ways to greet someone',
+        ];
+
   return (
     <div className="flex-1 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden">
-      {/* Header */}
+      {/* Header with Custom Animated Gemini Logo */}
       <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
           {onClose && (
             <button
               type="button"
               onClick={onClose}
-              aria-label="Back to chats"
-              className="md:hidden min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 shrink-0"
+              aria-label={t(lang, 'backBtn')}
+              className="min-h-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold shrink-0 transition-colors"
             >
-              <ArrowLeft className="w-5 h-5" />
+              <ArrowLeft className="w-4 h-4 shrink-0" />
+              <span className="hidden sm:inline">{t(lang, 'backBtn')}</span>
             </button>
           )}
-          <div className="w-10 h-10 rounded-full bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
-            <Bot className="w-5 h-5" />
-          </div>
+          <GeminiLogo variant="badge" size={22} animate={loading} />
           <div className="min-w-0">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white truncate">
-              Gemini Assistant
-            </h2>
+            <div className="flex items-center gap-1.5">
+              <h2 className="text-base font-bold text-slate-900 dark:text-white truncate">
+                {t(lang, 'geminiAssistantTitle')}
+              </h2>
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 text-[10px] font-semibold">
+                <Zap className="w-2.5 h-2.5" />
+                {t(lang, 'geminiFastTag')}
+              </span>
+            </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
-              Multi-turn AI · {modelChoice === 'gemini-4-hydrogen' ? 'Balanced' : 'Fast Lite'}
+              {modelChoice === 'gemini-3.1-flash-lite'
+                ? 'Ultra-Fast Live Streaming'
+                : 'Balanced Smart Streaming'}
             </p>
           </div>
         </div>
@@ -179,8 +326,8 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
             onChange={(e) => setModelChoice(e.target.value as ModelChoice)}
             className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-600"
           >
+            <option value="gemini-3.1-flash-lite">Ultra Fast (Flash Lite)</option>
             <option value="gemini-4-hydrogen">Balanced (Hydrogen)</option>
-            <option value="gemini-3.1-flash-lite">Fast (Flash Lite)</option>
           </select>
 
           <button
@@ -220,7 +367,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
               key={turn.id}
               id={turn.id}
               text={turn.text}
-              senderName="Gemini"
+              senderName="Gemini AI"
               timestampText={new Date(turn.timestamp).toLocaleTimeString([], {
                 hour: '2-digit',
                 minute: '2-digit',
@@ -234,23 +381,31 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
               }
               reactions={aggregated}
               onReact={(emoji) => handleLocalReact(turn.id, emoji)}
+              onCopy={
+                turn.role === 'model'
+                  ? () => {
+                      void navigator.clipboard.writeText(turn.text);
+                    }
+                  : undefined
+              }
             />
           );
         })}
 
-        {/* Animated Typing Indicator while Gemini generates */}
+        {/* Waiting dot before first token arrives (<200ms typical) */}
         <AnimatePresence>
-          {loading && (
+          {loading && !streamingTurnId && (
             <motion.div
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 4 }}
-              transition={{ duration: 0.16 }}
+              transition={{ duration: 0.14 }}
               className="flex items-center gap-2"
             >
-              <div className="px-4 py-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-2">
+              <div className="px-4 py-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-2.5">
+                <GeminiLogo variant="icon" size={16} animate />
                 <span className="text-xs text-slate-500 dark:text-slate-400">
-                  Gemini is typing
+                  {lang === 'bn' ? 'উত্তর তৈরি হচ্ছে...' : 'Gemini is replying...'}
                 </span>
                 <span className="flex items-center gap-1">
                   {[0, 1, 2].map((i) => (
@@ -258,11 +413,11 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
                       key={i}
                       animate={{ y: [0, -4, 0], opacity: [0.4, 1, 0.4] }}
                       transition={{
-                        duration: 0.9,
+                        duration: 0.75,
                         repeat: Infinity,
-                        delay: i * 0.15,
+                        delay: i * 0.12,
                       }}
-                      className="w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400"
+                      className="w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-cyan-400"
                     />
                   ))}
                 </span>
@@ -277,11 +432,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
       {/* Quick Prompt Chips when fresh */}
       {turns.length <= 1 && (
         <div className="px-4 sm:px-6 pb-2 flex flex-wrap gap-2 bg-slate-50/50 dark:bg-slate-950">
-          {[
-            'Write a polite message to my friend in Banglish',
-            'Translate "I will reach in 10 minutes" to Bangla',
-            'Suggest 3 ways to greet someone warmly',
-          ].map((suggestion) => (
+          {suggestions.map((suggestion) => (
             <button
               key={suggestion}
               type="button"
@@ -295,12 +446,19 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
       )}
 
       {error && (
-        <div className="px-4 sm:px-6 py-2 bg-red-50 dark:bg-red-950/40 border-t border-red-200 dark:border-red-900 text-xs text-red-700 dark:text-red-300">
-          {error}
+        <div className="px-4 sm:px-6 py-2.5 bg-red-50 dark:bg-red-950/40 border-t border-red-200 dark:border-red-900 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError('')}
+            className="font-semibold underline shrink-0"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
-      {/* Composer */}
+      {/* Composer with Stop & Streaming Feedback */}
       <form
         onSubmit={(e) => handleSend(e)}
         className="p-3 sm:p-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center gap-2.5 shrink-0"
@@ -315,23 +473,35 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
           }
           className="flex-1 min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
         />
-        <motion.button
-          type="submit"
-          whileTap={{ scale: 0.92 }}
-          disabled={!input.trim() || loading}
-          className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
-        >
-          <motion.span
-            key={sendPulseKey}
-            initial={sendPulseKey > 0 ? { x: -8, y: 8, scale: 0.7 } : false}
-            animate={{ x: 0, y: 0, scale: 1 }}
-            transition={{ type: 'spring', stiffness: 420, damping: 20 }}
-            className="inline-flex items-center"
+        {loading ? (
+          <motion.button
+            type="button"
+            whileTap={{ scale: 0.92 }}
+            onClick={stopGeneration}
+            className="min-h-[44px] px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0"
           >
-            <Send className="w-4 h-4" />
-          </motion.span>
-          <span className="hidden sm:inline">{t(lang, 'send')}</span>
-        </motion.button>
+            <Square className="w-3.5 h-3.5 fill-current" />
+            <span className="hidden sm:inline">{t(lang, 'stopGenerating')}</span>
+          </motion.button>
+        ) : (
+          <motion.button
+            type="submit"
+            whileTap={{ scale: 0.92 }}
+            disabled={!input.trim()}
+            className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
+          >
+            <motion.span
+              key={sendPulseKey}
+              initial={sendPulseKey > 0 ? { x: -8, y: 8, scale: 0.7 } : false}
+              animate={{ x: 0, y: 0, scale: 1 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 20 }}
+              className="inline-flex items-center"
+            >
+              <Send className="w-4 h-4" />
+            </motion.span>
+            <span className="hidden sm:inline">{t(lang, 'send')}</span>
+          </motion.button>
+        )}
       </form>
     </div>
   );

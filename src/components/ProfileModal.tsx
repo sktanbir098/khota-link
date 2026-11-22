@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
+  ArrowLeft,
   Bell,
   BellRing,
   Check,
@@ -10,7 +11,6 @@ import {
   Loader2,
   LogOut,
   Moon,
-  Phone,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
@@ -39,7 +39,6 @@ interface Props {
   onUpdated: (updates: {
     displayName: string;
     bio: string;
-    phoneNumber: string;
     language: AppLanguage;
     showOnlineStatus: boolean;
   }) => void;
@@ -50,15 +49,6 @@ interface Props {
   onSignOut: () => void;
   onDeleteAccount: () => Promise<void>;
 }
-
-const COUNTRY_CODES = [
-  { label: 'BD +880', value: '+880' },
-  { label: 'IN +91', value: '+91' },
-  { label: 'US +1', value: '+1' },
-  { label: 'UK +44', value: '+44' },
-  { label: 'AE +971', value: '+971' },
-  { label: 'SA +966', value: '+966' },
-];
 
 const BIO_PRESETS_EN = [
   'Available on KothaLink',
@@ -124,8 +114,6 @@ export const ProfileModal: React.FC<Props> = ({
   const [activeTab, setActiveTab] = useState<'profile' | 'settings' | 'account'>('profile');
   const [displayName, setDisplayName] = useState(publicProfile.displayName);
   const [bio, setBio] = useState(publicProfile.bio || '');
-  const [countryCode, setCountryCode] = useState('+880');
-  const [phoneInput, setPhoneInput] = useState(privateInfo.phoneNumber || '');
   const [selectedLang, setSelectedLang] = useState<AppLanguage>(lang);
   const [showOnlineStatus, setShowOnlineStatus] = useState<boolean>(
     publicProfile.showOnlineStatus !== false
@@ -145,22 +133,18 @@ export const ProfileModal: React.FC<Props> = ({
     setError('');
     setSaving(true);
     try {
-      const res = await updateUserSettings({
+      await updateUserSettings({
         uid: publicProfile.uid,
         email: privateInfo.email,
         displayName,
         bio,
         photoUrl: publicProfile.photoUrl,
-        oldPhone: privateInfo.phoneNumber,
-        newPhoneRaw: phoneInput,
-        countryCode,
         language: selectedLang,
         showOnlineStatus,
       });
       onUpdated({
         displayName: displayName.trim() || publicProfile.displayName,
         bio: bio.trim(),
-        phoneNumber: res.phoneNumber,
         language: selectedLang,
         showOnlineStatus,
       });
@@ -207,16 +191,26 @@ export const ProfileModal: React.FC<Props> = ({
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
         className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-2xl max-h-[90dvh] flex flex-col"
       >
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0">
-          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
-            {t(lang, 'profileSettings')}
-          </h2>
+        {/* Header with Top-Left Back Button */}
+        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t(lang, 'backBtn')}
+              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shrink-0 transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100 truncate">
+              {t(lang, 'profileSettings')}
+            </h2>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
@@ -343,37 +337,6 @@ export const ProfileModal: React.FC<Props> = ({
                         ))}
                       </div>
                     </div>
-                  </div>
-
-                  {/* Mobile Number */}
-                  <div className="space-y-1.5">
-                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
-                      <Phone className="w-3.5 h-3.5" />
-                      {t(lang, 'linkPhoneTitle')}
-                    </label>
-                    <div className="flex gap-2">
-                      <select
-                        value={countryCode}
-                        onChange={(e) => setCountryCode(e.target.value)}
-                        className="min-h-[44px] px-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-sm font-mono-tabular focus:outline-none focus:ring-2 focus:ring-blue-600"
-                      >
-                        {COUNTRY_CODES.map((c) => (
-                          <option key={c.value} value={c.value}>
-                            {c.label}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="tel"
-                        value={phoneInput}
-                        onChange={(e) => setPhoneInput(e.target.value)}
-                        placeholder="+8801712345678"
-                        className="flex-1 min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-sm font-mono-tabular focus:outline-none focus:ring-2 focus:ring-blue-600"
-                      />
-                    </div>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                      {t(lang, 'linkPhoneHint')}
-                    </p>
                   </div>
                 </motion.div>
               )}

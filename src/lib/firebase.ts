@@ -4,8 +4,10 @@ import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+const firestoreDatabaseId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
+export const db = firestoreDatabaseId ? getFirestore(app, firestoreDatabaseId) : getFirestore(app);
 export const auth = getAuth(app);
+
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
@@ -47,12 +49,12 @@ export interface FirestoreErrorInfo {
   };
 }
 
-export function handleFirestoreError(
+export function buildFirestoreErrorInfo(
   error: unknown,
   operationType: OperationType,
   path: string | null
-): never {
-  const errInfo: FirestoreErrorInfo = {
+): FirestoreErrorInfo {
+  return {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
       userId: auth.currentUser?.uid,
@@ -69,7 +71,24 @@ export function handleFirestoreError(
     operationType,
     path,
   };
+}
+
+export function logFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): FirestoreErrorInfo {
+  const errInfo = buildFirestoreErrorInfo(error, operationType, path);
   console.error('Firestore Error: ', JSON.stringify(errInfo));
+  return errInfo;
+}
+
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): never {
+  const errInfo = logFirestoreError(error, operationType, path);
   throw new Error(JSON.stringify(errInfo));
 }
 
@@ -85,7 +104,7 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-export function normalizePhone(rawPhone: string, defaultCountryCode = '+880'): string {
+export function normalizePhone(rawPhone: string, defaultCountryCode = '+91'): string {
   const cleaned = rawPhone.replace(/[\s\-().]/g, '');
   if (!cleaned) return '';
   if (cleaned.startsWith('+')) {
@@ -96,11 +115,21 @@ export function normalizePhone(rawPhone: string, defaultCountryCode = '+880'): s
   }
   const digits = cleaned.replace(/\D/g, '');
   if (!digits) return '';
-  // Handle local leading 0 (e.g. Bangladesh 017... with +880)
+  if (defaultCountryCode === '+91' && digits.length === 12 && digits.startsWith('91') && /^[6-9]/.test(digits.slice(2))) {
+    return '+' + digits;
+  }
+  if (defaultCountryCode === '+880' && digits.length === 13 && digits.startsWith('880')) {
+    return '+' + digits;
+  }
+  // Handle local leading 0 (e.g. India 09876... or Bangladesh 017...)
   if (digits.startsWith('0') && defaultCountryCode) {
     return defaultCountryCode + digits.slice(1);
   }
   return defaultCountryCode + digits;
+}
+
+export function isValidIndianMobile(e164Phone: string): boolean {
+  return /^\+91[6-9]\d{9}$/.test(e164Phone);
 }
 
 export function maskEmail(email: string): string {

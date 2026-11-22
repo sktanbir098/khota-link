@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, Clock, Download, FileText, Loader2, Reply, Smile } from 'lucide-react';
+import { Check, Clock, Copy, Download, FileText, Loader2, Reply, Smile } from 'lucide-react';
 import { formatFileSize, triggerFileDownload } from '../lib/attachments';
 import { AttachmentType, REACTION_EMOJIS, ReactionEmoji } from '../types/chat';
 
@@ -27,6 +27,7 @@ interface Props {
   reactions: AggregatedReaction[];
   onReact: (emoji: ReactionEmoji) => void;
   onReply?: () => void;
+  onCopy?: () => void;
   onPreviewImage?: (dataUrl: string, name: string) => void;
   onResolveAttachment?: (messageId: string, marker: string) => Promise<string>;
 }
@@ -48,10 +49,12 @@ export const MessageBubble: React.FC<Props> = ({
   reactions,
   onReact,
   onReply,
+  onCopy,
   onPreviewImage,
   onResolveAttachment,
 }) => {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [copiedText, setCopiedText] = useState(false);
   const [resolvedUrl, setResolvedUrl] = useState<string>(() =>
     attachmentData && !attachmentData.startsWith('chunked:') ? attachmentData : ''
   );
@@ -382,7 +385,7 @@ export const MessageBubble: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* Inline Action Controls (Emoji React + Reply) */}
+        {/* Inline Action Controls (Emoji React + Reply + Optional Copy) */}
         <div className="flex items-center gap-0.5 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
           <button
             type="button"
@@ -392,6 +395,20 @@ export const MessageBubble: React.FC<Props> = ({
           >
             <Smile className="w-3.5 h-3.5" />
           </button>
+          {onCopy && text && (
+            <button
+              type="button"
+              onClick={() => {
+                onCopy();
+                setCopiedText(true);
+                window.setTimeout(() => setCopiedText(false), 1600);
+              }}
+              aria-label="Copy message"
+              className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+            >
+              {copiedText ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+          )}
           {onReply && (
             <button
               type="button"

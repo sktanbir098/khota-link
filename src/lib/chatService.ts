@@ -29,6 +29,7 @@ import {
   LIMITS,
   MessageReaction,
   MessageTransport,
+  PendingDelivery,
   PreparedAttachment,
   ReactionEmoji,
   StatusBgGradient,
@@ -44,10 +45,9 @@ import {
   db,
   googleProvider,
   handleFirestoreError,
+  logFirestoreError,
   maskEmail,
-  maskPhone,
   normalizeEmail,
-  normalizePhone,
   OperationType,
   sanitizeStr,
   sha256Hex,
@@ -69,6 +69,16 @@ export function formatFriendlyError(err: unknown): string {
   return raw || 'Something went wrong. Please try again.';
 }
 
+function reportListenerError(
+  err: unknown,
+  op: OperationType,
+  path: string,
+  onError?: (friendlyMessage: string) => void
+): void {
+  const info = logFirestoreError(err, op, path);
+  onError?.(formatFriendlyError(JSON.stringify(info)));
+}
+
 function makeRandomCode(length = 6): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
@@ -87,7 +97,10 @@ export async function ensureUserProfile(user: User): Promise<{
   const userRef = doc(db, 'users', user.uid);
   const privateRef = doc(db, 'users', user.uid, 'private', 'info');
 
-  const displayName = sanitizeStr(user.displayName || user.email?.split('@')[0] || 'KothaLink User', LIMITS.DISPLAY_NAME_MAX);
+  const displayName = sanitizeStr(
+    user.displayName || user.email?.split('@')[0] || 'KothaLink User',
+    LIMITS.DISPLAY_NAME_MAX
+  );
   const photoUrl = sanitizeStr(user.photoURL || '', LIMITS.PHOTO_URL_MAX);
   const email = sanitizeStr(normalizeEmail(user.email || ''), LIMITS.EMAIL_MAX);
 
@@ -114,13 +127,15 @@ export async function ensureUserProfile(user: User): Promise<{
 
   const batch = writeBatch(db);
 
+  const safeDisplayName = displayName || 'KothaLink User';
+
   if (!existingPublic) {
     batch.set(userRef, {
       uid: user.uid,
-      displayName,
+      displayName: safeDisplayName,
       photoUrl,
       bio: 'Available on KothaLink',
-      hasPhone: Boolean(existingPrivate?.phoneNumber),
+      hasPhone: false,
       showOnlineStatus: true,
       onlineStatus: 'online',
       lastSeenAt: serverTimestamp(),
@@ -128,11 +143,28 @@ export async function ensureUserProfile(user: User): Promise<{
       updatedAt: serverTimestamp(),
     });
   } else {
-    batch.update(userRef, {
+    // Backfill any required schema fields missing on legacy user documents so Firestore rules pass cleanly
+    const pubUpdates: Record<string, unknown> = {
       onlineStatus: 'online',
       lastSeenAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (typeof existingPublic.displayName !== 'string' || !existingPublic.displayName.trim()) {
+      pubUpdates.displayName = safeDisplayName;
+    }
+    if (typeof existingPublic.photoUrl !== 'string') {
+      pubUpdates.photoUrl = photoUrl;
+    }
+    if (typeof existingPublic.bio !== 'string') {
+      pubUpdates.bio = 'Available on KothaLink';
+    }
+    if (typeof existingPublic.hasPhone !== 'boolean') {
+      pubUpdates.hasPhone = false;
+    }
+    if (typeof existingPublic.showOnlineStatus !== 'boolean') {
+      pubUpdates.showOnlineStatus = true;
+    }
+    batch.update(userRef, pubUpdates);
   }
 
   if (!existingPrivate) {
@@ -143,11 +175,21 @@ export async function ensureUserProfile(user: User): Promise<{
       language: 'en',
       updatedAt: serverTimestamp(),
     });
-  } else if (email && existingPrivate.email !== email) {
-    batch.update(privateRef, {
-      email,
-      updatedAt: serverTimestamp(),
-    });
+  } else {
+    const privUpdates: Record<string, unknown> = {};
+    if (email && existingPrivate.email !== email) {
+      privUpdates.email = email;
+    }
+    if (typeof existingPrivate.phoneNumber !== 'string') {
+      privUpdates.phoneNumber = '';
+    }
+    if (existingPrivate.language !== 'en' && existingPrivate.language !== 'bn') {
+      privUpdates.language = 'en';
+    }
+    if (Object.keys(privUpdates).length > 0) {
+      privUpdates.updatedAt = serverTimestamp();
+      batch.update(privateRef, privUpdates);
+    }
   }
 
   // Register SHA-256 email directory entry so friends can find this user by Gmail
@@ -164,7 +206,7 @@ export async function ensureUserProfile(user: User): Promise<{
     if (!dirExists) {
       batch.set(dirRef, {
         uid: user.uid,
-        displayName: existingPublic?.displayName || displayName,
+        displayName: existingPublic?.displayName || safeDisplayName,
         photoUrl: existingPublic?.photoUrl || photoUrl,
         updatedAt: serverTimestamp(),
       });
@@ -194,22 +236,12 @@ export async function updateUserSettings(params: {
   displayName: string;
   bio: string;
   photoUrl: string;
-  oldPhone: string;
-  newPhoneRaw: string;
-  countryCode: string;
   language: AppLanguage;
   showOnlineStatus?: boolean;
-}): Promise<{ phoneNumber: string }> {
+}): Promise<void> {
   const cleanName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
   const cleanBio = sanitizeStr(params.bio, LIMITS.BIO_MAX);
   const cleanPhoto = sanitizeStr(params.photoUrl, LIMITS.PHOTO_URL_MAX);
-  const normalizedPhone = params.newPhoneRaw.trim()
-    ? sanitizeStr(normalizePhone(params.newPhoneRaw, params.countryCode), LIMITS.PHONE_MAX)
-    : '';
-
-  if (normalizedPhone && !LIMITS.PHONE_PATTERN.test(normalizedPhone)) {
-    throw new Error('Please enter a valid mobile number with country code (e.g., +8801712345678).');
-  }
 
   const batch = writeBatch(db);
   const userRef = doc(db, 'users', params.uid);
@@ -218,7 +250,7 @@ export async function updateUserSettings(params: {
   const userUpdates: Record<string, unknown> = {
     displayName: cleanName,
     bio: cleanBio,
-    hasPhone: Boolean(normalizedPhone),
+    hasPhone: false,
     updatedAt: serverTimestamp(),
   };
   if (typeof params.showOnlineStatus === 'boolean') {
@@ -227,7 +259,7 @@ export async function updateUserSettings(params: {
   batch.update(userRef, userUpdates);
 
   batch.update(privateRef, {
-    phoneNumber: normalizedPhone,
+    phoneNumber: '',
     language: params.language,
     updatedAt: serverTimestamp(),
   });
@@ -250,59 +282,11 @@ export async function updateUserSettings(params: {
     }
   }
 
-  // Delete old phone hash if phone changed
-  if (params.oldPhone && params.oldPhone !== normalizedPhone) {
-    const oldHash = await sha256Hex(params.oldPhone);
-    const oldDirRef = doc(db, 'phone_directory', oldHash);
-    try {
-      const oldSnap = await getDoc(oldDirRef);
-      if (oldSnap.exists() && oldSnap.data().uid === params.uid) {
-        await deleteDoc(oldDirRef);
-      }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `phone_directory/${oldHash}`);
-    }
-  }
-
-  // Register new phone hash
-  if (normalizedPhone) {
-    const newHash = await sha256Hex(normalizedPhone);
-    const newDirRef = doc(db, 'phone_directory', newHash);
-    let existingEntry: DirectoryEntry | null = null;
-    try {
-      const snap = await getDoc(newDirRef);
-      if (snap.exists()) existingEntry = snap.data() as DirectoryEntry;
-    } catch (err) {
-      handleFirestoreError(err, OperationType.GET, `phone_directory/${newHash}`);
-    }
-
-    if (existingEntry && existingEntry.uid !== params.uid) {
-      throw new Error('This mobile number is already linked to another account.');
-    }
-
-    if (existingEntry) {
-      batch.update(newDirRef, {
-        displayName: cleanName,
-        photoUrl: cleanPhoto,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      batch.set(newDirRef, {
-        uid: params.uid,
-        displayName: cleanName,
-        photoUrl: cleanPhoto,
-        updatedAt: serverTimestamp(),
-      });
-    }
-  }
-
   try {
     await batch.commit();
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, `users/${params.uid}`);
   }
-
-  return { phoneNumber: normalizedPhone };
 }
 
 export async function updateUserPresence(
@@ -357,7 +341,8 @@ export function subscribeUserProfiles(
 
 export function subscribeUserChats(
   uid: string,
-  onChats: (chats: ChatRoom[]) => void
+  onChats: (chats: ChatRoom[]) => void,
+  onError?: (friendlyMessage: string) => void
 ): Unsubscribe {
   const q = query(
     collection(db, 'chats'),
@@ -375,13 +360,14 @@ export function subscribeUserChats(
         });
       onChats(list);
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, 'chats')
+    (err) => reportListenerError(err, OperationType.LIST, 'chats', onError)
   );
 }
 
 export function subscribeChatMessages(
   chatId: string,
-  onMessages: (messages: ChatMessage[]) => void
+  onMessages: (messages: ChatMessage[]) => void,
+  onError?: (friendlyMessage: string) => void
 ): Unsubscribe {
   const path = `chats/${chatId}/messages`;
   const q = query(collection(db, 'chats', chatId, 'messages'), orderBy('createdAt', 'asc'));
@@ -394,7 +380,7 @@ export function subscribeChatMessages(
       }));
       onMessages(msgs);
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, path)
+    (err) => reportListenerError(err, OperationType.LIST, path, onError)
   );
 }
 
@@ -490,15 +476,17 @@ export async function startChatByGmail(params: {
     }
 
     const chatId = `dm_${sorted[0]}_${sorted[1]}`.slice(0, LIMITS.ID_MAX);
+    const peerLabel = sanitizeStr(peerEntry.displayName, LIMITS.CHAT_TITLE_MAX) || 'Friend';
+    const creatorLabel = sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX) || 'User';
     try {
       await setDoc(doc(db, 'chats', chatId), {
         id: chatId,
         channel: 'gmail' as ChatChannel,
-        title: sanitizeStr(peerEntry.displayName, LIMITS.CHAT_TITLE_MAX),
+        title: peerLabel,
         targetHint: sanitizeStr(maskEmail(cleanEmail), LIMITS.TARGET_HINT_MAX),
         creatorId: params.currentUser.uid,
-        creatorName: sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX),
-        peerName: sanitizeStr(peerEntry.displayName, LIMITS.DISPLAY_NAME_MAX),
+        creatorName: creatorLabel,
+        peerName: sanitizeStr(peerLabel, LIMITS.DISPLAY_NAME_MAX) || 'Friend',
         participantIds: sorted,
         inviteCode: '',
         lastMessageText: 'Connected via Gmail',
@@ -515,7 +503,7 @@ export async function startChatByGmail(params: {
   }
 
   // Friend hasn't signed in yet -> reuse existing pending invite for same Gmail if present
-  const maskedTarget = sanitizeStr(maskEmail(cleanEmail), LIMITS.TARGET_HINT_MAX);
+  const maskedTarget = sanitizeStr(maskEmail(cleanEmail), LIMITS.TARGET_HINT_MAX) || 'Gmail user';
   const existingPending = findExistingPendingChat(
     params.existingChats,
     params.currentUser.uid,
@@ -531,19 +519,21 @@ export async function startChatByGmail(params: {
 
   const inviteCode = makeRandomCode(6);
   const chatId = `inv_g_${Date.now().toString(36)}_${makeRandomCode(4)}`;
+  const creatorLabel = sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX) || 'User';
 
   try {
     await setDoc(doc(db, 'chats', chatId), {
       id: chatId,
       channel: 'gmail' as ChatChannel,
-      title: sanitizeStr(cleanEmail.split('@')[0] || 'Gmail Invite', LIMITS.CHAT_TITLE_MAX),
+      title: sanitizeStr(cleanEmail.split('@')[0] || 'Gmail Invite', LIMITS.CHAT_TITLE_MAX) || 'Gmail Invite',
       targetHint: maskedTarget,
       creatorId: params.currentUser.uid,
-      creatorName: sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX),
+      creatorName: creatorLabel,
       peerName: maskedTarget,
       participantIds: [params.currentUser.uid],
       inviteCode,
-      lastMessageText: `Invite link ready (${inviteCode})`,
+      pendingRecipientHash: emailHash,
+      lastMessageText: `Waiting for ${maskedTarget}`,
       lastMessageSenderId: params.currentUser.uid,
       lastMessageAt: serverTimestamp(),
       createdAt: serverTimestamp(),
@@ -558,141 +548,74 @@ export async function startChatByGmail(params: {
       code: inviteCode,
       chatId,
       creatorId: params.currentUser.uid,
-      creatorName: sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX),
+      creatorName: creatorLabel,
       channel: 'gmail' as ChatChannel,
       createdAt: serverTimestamp(),
     });
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, `chat_invites/${inviteCode}`);
+  }
+
+  const deliveryId = `${emailHash}_${chatId}`;
+  try {
+    await setDoc(doc(db, 'pending_deliveries', deliveryId), {
+      id: deliveryId,
+      recipientHash: emailHash,
+      chatId,
+      creatorId: params.currentUser.uid,
+      creatorName: creatorLabel,
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `pending_deliveries/${deliveryId}`);
   }
 
   return { chatId, isPendingInvite: true, inviteCode };
 }
 
-export async function startChatByPhone(params: {
+export async function claimPendingEmailChats(params: {
+  user: User;
   currentUser: UserPublicProfile;
-  targetPhoneRaw: string;
-  countryCode: string;
-  contactAlias?: string;
-  existingChats: ChatRoom[];
-}): Promise<{ chatId: string; isPendingInvite: boolean; inviteCode: string }> {
-  const normalizedPhone = normalizePhone(params.targetPhoneRaw, params.countryCode);
-  if (!normalizedPhone || !LIMITS.PHONE_PATTERN.test(normalizedPhone)) {
-    throw new Error('Please enter a valid mobile number (e.g., +8801712345678 or 01712345678).');
-  }
+}): Promise<number> {
+  const rawEmail = params.user.email || '';
+  if (!rawEmail) return 0;
 
-  const phoneHash = await sha256Hex(normalizedPhone);
-  let peerEntry: DirectoryEntry | null = null;
+  const targetHash = await sha256Hex(normalizeEmail(rawEmail));
+  let snap;
   try {
-    const snap = await getDoc(doc(db, 'phone_directory', phoneHash));
-    if (snap.exists()) peerEntry = snap.data() as DirectoryEntry;
-  } catch (err) {
-    handleFirestoreError(err, OperationType.GET, `phone_directory/${phoneHash}`);
-  }
-
-  if (peerEntry && peerEntry.uid === params.currentUser.uid) {
-    throw new Error('This is your own linked mobile number. Enter a friend’s number.');
-  }
-
-  if (peerEntry) {
-    const existingLocal = findExistingDirectChat(
-      params.existingChats,
-      params.currentUser.uid,
-      peerEntry.uid
+    snap = await getDocs(
+      query(collection(db, 'pending_deliveries'), where('recipientHash', '==', targetHash))
     );
-    if (existingLocal) {
-      return { chatId: existingLocal.id, isPendingInvite: false, inviteCode: existingLocal.inviteCode };
-    }
+  } catch {
+    return 0;
+  }
+  if (snap.empty) return 0;
 
-    const sorted = [params.currentUser.uid, peerEntry.uid].sort();
-    const existingRemote = await findExistingDirectChatOnServer(sorted);
-    if (existingRemote) {
-      return {
-        chatId: existingRemote.id,
-        isPendingInvite: false,
-        inviteCode: existingRemote.inviteCode,
-      };
-    }
+  let claimedCount = 0;
+  const peerLabel = sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX) || 'Friend';
 
-    const chatId = `dm_${sorted[0]}_${sorted[1]}`.slice(0, LIMITS.ID_MAX);
+  for (const d of snap.docs) {
+    const delivery = d.data() as PendingDelivery;
+    if (!delivery?.chatId || delivery.creatorId === params.user.uid) continue;
     try {
-      await setDoc(doc(db, 'chats', chatId), {
-        id: chatId,
-        channel: 'phone' as ChatChannel,
-        title: sanitizeStr(peerEntry.displayName, LIMITS.CHAT_TITLE_MAX),
-        targetHint: sanitizeStr(maskPhone(normalizedPhone), LIMITS.TARGET_HINT_MAX),
-        creatorId: params.currentUser.uid,
-        creatorName: sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX),
-        peerName: sanitizeStr(peerEntry.displayName, LIMITS.DISPLAY_NAME_MAX),
-        participantIds: sorted,
-        inviteCode: '',
-        lastMessageText: 'Connected via Mobile Number',
-        lastMessageSenderId: params.currentUser.uid,
-        lastMessageAt: serverTimestamp(),
-        createdAt: serverTimestamp(),
+      await updateDoc(doc(db, 'chats', delivery.chatId), {
+        participantIds: arrayUnion(params.user.uid),
+        peerName: peerLabel,
+        pendingRecipientHash: '',
         updatedAt: serverTimestamp(),
       });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `chats/${chatId}`);
+      claimedCount += 1;
+    } catch {
+      // May already be claimed or deleted; still attempt cleanup of delivery index
     }
-
-    return { chatId, isPendingInvite: false, inviteCode: '' };
+    try {
+      await deleteDoc(d.ref);
+    } catch {
+      // Best-effort cleanup
+    }
   }
 
-  // Friend hasn't linked their number yet -> reuse existing pending invite for same phone number
-  const maskedTarget = sanitizeStr(maskPhone(normalizedPhone), LIMITS.TARGET_HINT_MAX);
-  const existingPending = findExistingPendingChat(
-    params.existingChats,
-    params.currentUser.uid,
-    maskedTarget
-  );
-  if (existingPending) {
-    return {
-      chatId: existingPending.id,
-      isPendingInvite: true,
-      inviteCode: existingPending.inviteCode,
-    };
-  }
-
-  const inviteCode = makeRandomCode(6);
-  const chatId = `inv_p_${Date.now().toString(36)}_${makeRandomCode(4)}`;
-  const label = sanitizeStr(params.contactAlias || maskedTarget, LIMITS.CHAT_TITLE_MAX);
-
-  try {
-    await setDoc(doc(db, 'chats', chatId), {
-      id: chatId,
-      channel: 'phone' as ChatChannel,
-      title: label,
-      targetHint: maskedTarget,
-      creatorId: params.currentUser.uid,
-      creatorName: sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX),
-      peerName: label,
-      participantIds: [params.currentUser.uid],
-      inviteCode,
-      lastMessageText: `Invite code ready (${inviteCode})`,
-      lastMessageSenderId: params.currentUser.uid,
-      lastMessageAt: serverTimestamp(),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (err) {
-    handleFirestoreError(err, OperationType.CREATE, `chats/${chatId}`);
-  }
-
-  try {
-    await setDoc(doc(db, 'chat_invites', inviteCode), {
-      code: inviteCode,
-      chatId,
-      creatorId: params.currentUser.uid,
-      creatorName: sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX),
-      channel: 'phone' as ChatChannel,
-      createdAt: serverTimestamp(),
-    });
-  } catch (err) {
-    handleFirestoreError(err, OperationType.CREATE, `chat_invites/${inviteCode}`);
-  }
-
-  return { chatId, isPendingInvite: true, inviteCode };
+  return claimedCount;
 }
 
 export async function joinChatByInviteCode(params: {
@@ -907,7 +830,7 @@ export function subscribeChatReactions(
       }));
       onReactions(list);
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, path)
+    (err) => reportListenerError(err, OperationType.LIST, path)
   );
 }
 
@@ -949,7 +872,7 @@ export function subscribeTypingStatus(
       const list = snapshot.docs.map((d) => d.data() as TypingStatus);
       onTypingChange(list);
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, path)
+    (err) => reportListenerError(err, OperationType.LIST, path)
   );
 }
 
@@ -1009,6 +932,14 @@ export async function deleteChatRoom(params: {
     if (params.chat.inviteCode && params.chat.creatorId === params.currentUid) {
       try {
         await deleteDoc(doc(db, 'chat_invites', params.chat.inviteCode));
+      } catch {
+        // Ignore if already deleted
+      }
+    }
+
+    if (params.chat.pendingRecipientHash && params.chat.creatorId === params.currentUid) {
+      try {
+        await deleteDoc(doc(db, 'pending_deliveries', `${params.chat.pendingRecipientHash}_${chatId}`));
       } catch {
         // Ignore if already deleted
       }
@@ -1135,7 +1066,8 @@ export async function deleteUserStatus(statusId: string): Promise<void> {
 
 export function subscribeStatusReactions(
   statusId: string,
-  onReactions: (reactions: StatusReaction[]) => void
+  onReactions: (reactions: StatusReaction[]) => void,
+  onError?: (friendlyMessage: string) => void
 ): Unsubscribe {
   const path = `statuses/${statusId}/reactions`;
   const q = query(collection(db, 'statuses', statusId, 'reactions'), where('statusId', '==', statusId));
@@ -1148,7 +1080,7 @@ export function subscribeStatusReactions(
       }));
       onReactions(list);
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, path)
+    (err) => reportListenerError(err, OperationType.LIST, path, onError)
   );
 }
 
@@ -1180,7 +1112,8 @@ export async function toggleStatusReaction(params: {
 
 export function subscribeStatusComments(
   statusId: string,
-  onComments: (comments: StatusComment[]) => void
+  onComments: (comments: StatusComment[]) => void,
+  onError?: (friendlyMessage: string) => void
 ): Unsubscribe {
   const path = `statuses/${statusId}/comments`;
   const q = query(
@@ -1198,7 +1131,7 @@ export function subscribeStatusComments(
         .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
       onComments(list);
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, path)
+    (err) => reportListenerError(err, OperationType.LIST, path, onError)
   );
 }
 
@@ -1238,6 +1171,8 @@ export async function deleteStatusComment(params: {
   }
 }
 
+const STATUS_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
 export function subscribeStatusesForUids(
   uids: string[],
   onStatuses: (statuses: UserStatus[]) => void
@@ -1261,7 +1196,15 @@ export function subscribeStatusesForUids(
     const merged: UserStatus[] = [];
     bucketMap.forEach((arr) => merged.push(...arr));
     const active = merged
-      .filter((s) => (s.expiresAt?.toMillis?.() ?? now + 1) > now)
+      .filter((s) => {
+        const createdMs = s.createdAt?.toMillis?.();
+        const explicitExpiryMs = s.expiresAt?.toMillis?.();
+        const effectiveExpiryMs = Math.max(
+          explicitExpiryMs ?? 0,
+          createdMs ? createdMs + STATUS_LIFETIME_MS : now + STATUS_LIFETIME_MS
+        );
+        return effectiveExpiryMs > now;
+      })
       .sort((a, b) => (b.createdAt?.toMillis?.() ?? Date.now()) - (a.createdAt?.toMillis?.() ?? Date.now()));
     onStatuses(active);
   };
@@ -1280,14 +1223,18 @@ export function subscribeStatusesForUids(
         );
         emit();
       },
-      () => {
-        // Ignore transient status query errors
+      (err) => {
+        console.warn('[KothaLink] Status subscription warning:', err?.message || err);
       }
     );
     unsubs.push(unsub);
   });
 
+  // Re-evaluate expiry every 60s so expired >24h statuses disappear accurately without early cutoff
+  const expiryTimer = window.setInterval(emit, 60_000);
+
   return () => {
+    window.clearInterval(expiryTimer);
     unsubs.forEach((u) => u());
   };
 }

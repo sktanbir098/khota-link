@@ -16,11 +16,11 @@ export function setSoundEnabled(enabled: boolean): void {
   localStorage.setItem(SOUND_STORAGE_KEY, enabled ? 'on' : 'off');
 }
 
-// Build a warm 3-note WAV chime in memory so HTMLAudioElement can play even when Web Audio is suspended in background tabs
+// Build a warm, glassy two-tone marimba WAV chime in memory for background/locked fallback playback
 function buildChimeWavDataUrl(): string {
   if (cachedWavUrl) return cachedWavUrl;
   const sampleRate = 22050;
-  const durationSec = 0.44;
+  const durationSec = 0.46;
   const numSamples = Math.floor(sampleRate * durationSec);
   const buffer = new ArrayBuffer(44 + numSamples * 2);
   const view = new DataView(buffer);
@@ -45,10 +45,10 @@ function buildChimeWavDataUrl(): string {
   writeString(36, 'data');
   view.setUint32(40, numSamples * 2, true);
 
+  // E5 -> B5 warm harmonic bell interval with subtle octave shimmer
   const notes = [
-    { freq: 587.33, start: 0.0, dur: 0.16, amp: 0.36 },
-    { freq: 880.0, start: 0.085, dur: 0.2, amp: 0.34 },
-    { freq: 1174.66, start: 0.17, dur: 0.24, amp: 0.24 },
+    { freq: 659.25, harmonic: 1318.5, start: 0.0, dur: 0.22, amp: 0.3, hAmp: 0.06, decay: 11 },
+    { freq: 987.77, harmonic: 1975.53, start: 0.085, dur: 0.32, amp: 0.34, hAmp: 0.07, decay: 8.5 },
   ];
 
   for (let i = 0; i < numSamples; i++) {
@@ -57,12 +57,14 @@ function buildChimeWavDataUrl(): string {
     for (const n of notes) {
       if (t >= n.start && t <= n.start + n.dur) {
         const localT = t - n.start;
-        const attack = Math.min(1, localT / 0.012);
-        const decay = Math.exp(-localT * 10);
-        sample += Math.sin(2 * Math.PI * n.freq * localT) * n.amp * attack * decay;
+        const attack = Math.min(1, localT / 0.01);
+        const decay = Math.exp(-localT * n.decay);
+        const fundamental = Math.sin(2 * Math.PI * n.freq * localT) * n.amp;
+        const overtone = Math.sin(2 * Math.PI * n.harmonic * localT) * n.hAmp * Math.exp(-localT * 18);
+        sample += (fundamental + overtone) * attack * decay;
       }
     }
-    const clamped = Math.max(-0.95, Math.min(0.95, sample));
+    const clamped = Math.max(-0.92, Math.min(0.92, sample));
     view.setInt16(44 + i * 2, Math.round(clamped * 32767), true);
   }
 
@@ -165,7 +167,7 @@ export async function playIncomingTone(): Promise<void> {
 
   if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
     try {
-      navigator.vibrate([110, 55, 130]);
+      navigator.vibrate([70, 45, 90]);
     } catch {
       // Ignore if vibration blocked
     }
@@ -178,42 +180,45 @@ export async function playIncomingTone(): Promise<void> {
     if (ctx) {
       try {
         const now = ctx.currentTime;
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(3400, now);
+        filter.connect(ctx.destination);
 
-        const osc1 = ctx.createOscillator();
-        const gain1 = ctx.createGain();
-        osc1.type = 'sine';
-        osc1.frequency.setValueAtTime(587.33, now);
-        gain1.gain.setValueAtTime(0.0001, now);
-        gain1.gain.exponentialRampToValueAtTime(0.2, now + 0.015);
-        gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.17);
-        osc1.connect(gain1);
-        gain1.connect(ctx.destination);
-        osc1.start(now);
-        osc1.stop(now + 0.18);
+        const triggerBell = (freq: number, startOffset: number, dur: number, peakAmp: number) => {
+          const osc = ctx.createOscillator();
+          const overtone = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const overGain = ctx.createGain();
 
-        const osc2 = ctx.createOscillator();
-        const gain2 = ctx.createGain();
-        osc2.type = 'triangle';
-        osc2.frequency.setValueAtTime(880, now + 0.085);
-        gain2.gain.setValueAtTime(0.0001, now + 0.085);
-        gain2.gain.exponentialRampToValueAtTime(0.19, now + 0.1);
-        gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-        osc2.connect(gain2);
-        gain2.connect(ctx.destination);
-        osc2.start(now + 0.085);
-        osc2.stop(now + 0.3);
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + startOffset);
 
-        const osc3 = ctx.createOscillator();
-        const gain3 = ctx.createGain();
-        osc3.type = 'sine';
-        osc3.frequency.setValueAtTime(1174.66, now + 0.165);
-        gain3.gain.setValueAtTime(0.0001, now + 0.165);
-        gain3.gain.exponentialRampToValueAtTime(0.12, now + 0.18);
-        gain3.gain.exponentialRampToValueAtTime(0.0001, now + 0.38);
-        osc3.connect(gain3);
-        gain3.connect(ctx.destination);
-        osc3.start(now + 0.165);
-        osc3.stop(now + 0.4);
+          overtone.type = 'sine';
+          overtone.frequency.setValueAtTime(freq * 2, now + startOffset);
+
+          gain.gain.setValueAtTime(0.0001, now + startOffset);
+          gain.gain.exponentialRampToValueAtTime(peakAmp, now + startOffset + 0.012);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + dur);
+
+          overGain.gain.setValueAtTime(0.0001, now + startOffset);
+          overGain.gain.exponentialRampToValueAtTime(peakAmp * 0.2, now + startOffset + 0.008);
+          overGain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + dur * 0.45);
+
+          osc.connect(gain);
+          overtone.connect(overGain);
+          gain.connect(filter);
+          overGain.connect(filter);
+
+          osc.start(now + startOffset);
+          overtone.start(now + startOffset);
+          osc.stop(now + startOffset + dur + 0.02);
+          overtone.stop(now + startOffset + dur + 0.02);
+        };
+
+        // Warm glassy marimba two-step: E5 -> B5
+        triggerBell(659.25, 0, 0.22, 0.16);
+        triggerBell(987.77, 0.085, 0.32, 0.19);
         return;
       } catch {
         // Fall through to HTMLAudioElement
@@ -224,7 +229,7 @@ export async function playIncomingTone(): Promise<void> {
   const audioEl = getOrCreateFallbackAudio();
   if (audioEl) {
     try {
-      audioEl.volume = 0.9;
+      audioEl.volume = 0.85;
       audioEl.currentTime = 0;
       await audioEl.play();
     } catch {
@@ -240,18 +245,26 @@ export async function playSentPop(): Promise<void> {
 
   try {
     const now = ctx.currentTime;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(2400, now);
+    filter.connect(ctx.destination);
+
+    // Subtle crisp waterdrop upward pluck
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(460, now);
-    osc.frequency.exponentialRampToValueAtTime(680, now + 0.06);
+    osc.frequency.setValueAtTime(520, now);
+    osc.frequency.exponentialRampToValueAtTime(860, now + 0.055);
+
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.085, now + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.085, now + 0.009);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(filter);
     osc.start(now);
-    osc.stop(now + 0.09);
+    osc.stop(now + 0.085);
   } catch {
     // Ignore audio errors
   }
@@ -332,12 +345,27 @@ export function stopRingtone(): void {
     window.clearInterval(ringtoneTimer);
     ringtoneTimer = null;
   }
+  if (fallbackAudioEl) {
+    try {
+      fallbackAudioEl.pause();
+      fallbackAudioEl.currentTime = 0;
+    } catch {
+      // Ignore
+    }
+  }
   if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
     try {
       navigator.vibrate(0);
     } catch {
       // Ignore
     }
+  }
+}
+
+export function suspendAudioForCall(): void {
+  stopRingtone();
+  if (audioCtx && audioCtx.state === 'running') {
+    audioCtx.suspend().catch(() => {});
   }
 }
 
@@ -349,6 +377,64 @@ export function startRingtone(kind: 'incoming' | 'ringback'): void {
   ringtoneTimer = window.setInterval(() => {
     void playRingBurst(kind);
   }, periodMs);
+}
+
+export async function playCallPickupTone(): Promise<void> {
+  if (!isSoundEnabled()) return;
+  const ctx = await ensureRunningContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+    const notes = [
+      { freq: 523.25, start: 0, dur: 0.14 },
+      { freq: 783.99, start: 0.07, dur: 0.22 },
+    ];
+    for (const n of notes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(n.freq, now + n.start);
+      gain.gain.setValueAtTime(0.0001, now + n.start);
+      gain.gain.exponentialRampToValueAtTime(0.14, now + n.start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + n.start + n.dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + n.start);
+      osc.stop(now + n.start + n.dur + 0.02);
+    }
+  } catch {
+    // Ignore audio errors
+  }
+}
+
+export async function playCallHangupTone(): Promise<void> {
+  if (!isSoundEnabled()) return;
+  const ctx = await ensureRunningContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+    const notes = [
+      { freq: 587.33, start: 0, dur: 0.14 },
+      { freq: 392.0, start: 0.08, dur: 0.24 },
+    ];
+    for (const n of notes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(n.freq, now + n.start);
+      gain.gain.setValueAtTime(0.0001, now + n.start);
+      gain.gain.exponentialRampToValueAtTime(0.13, now + n.start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + n.start + n.dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + n.start);
+      osc.stop(now + n.start + n.dur + 0.02);
+    }
+  } catch {
+    // Ignore audio errors
+  }
 }
 
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {

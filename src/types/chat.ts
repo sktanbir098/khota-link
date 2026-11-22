@@ -146,11 +146,21 @@ export interface ChatRoom {
   peerName: string;
   participantIds: string[];
   inviteCode: string;
+  pendingRecipientHash?: string;
   lastMessageText: string;
   lastMessageSenderId: string;
   lastMessageAt: Timestamp | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
+}
+
+export interface PendingDelivery {
+  id: string;
+  recipientHash: string;
+  chatId: string;
+  creatorId: string;
+  creatorName: string;
+  createdAt: Timestamp | null;
 }
 
 export interface ChatMessage {

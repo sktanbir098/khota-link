@@ -6,7 +6,6 @@ import {
   Bell,
   BellRing,
   Bluetooth,
-  Bot,
   Check,
   Copy,
   Download,
@@ -38,6 +37,7 @@ import { BluetoothNearbyPanel } from './components/BluetoothNearbyPanel';
 import { ActiveCallSession, CallOverlay } from './components/CallOverlay';
 import { ConnectModal } from './components/ConnectModal';
 import { GeminiChatPanel } from './components/GeminiChatPanel';
+import { GeminiLogo } from './components/GeminiLogo';
 import { KothaLinkLogo } from './components/KothaLinkLogo';
 import { AggregatedReaction, MessageBubble } from './components/MessageBubble';
 import { PeerProfileModal } from './components/PeerProfileModal';
@@ -46,6 +46,7 @@ import { STATUS_GRADIENTS, StatusModal } from './components/StatusModal';
 import { UserAvatar } from './components/UserAvatar';
 import { formatFileSize, prepareAttachment, triggerFileDownload } from './lib/attachments';
 import {
+  claimPendingEmailChats,
   createClientMessageId,
   deleteChatRoom,
   deleteUserAccount,
@@ -167,6 +168,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [optimisticByChat, setOptimisticByChat] = useState<Record<string, ChatMessage[]>>({});
   const [unreadChatIds, setUnreadChatIds] = useState<Set<string>>(() => new Set());
+  const [notifOpen, setNotifOpen] = useState(false);
   const [incomingBanner, setIncomingBanner] = useState<{
     chatId: string;
     senderName: string;
@@ -195,15 +197,16 @@ export default function App() {
   );
 
   // Navigation & filters
-  const [filterTab, setFilterTab] = useState<'all' | 'gmail' | 'phone' | 'nearby'>('all');
+  const [filterTab, setFilterTab] = useState<'all' | 'gmail' | 'nearby'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [workspaceView, setWorkspaceView] = useState<'hub' | 'chat' | 'bluetooth' | 'gemini'>('hub');
+  const [pendingEmailsByChat, setPendingEmailsByChat] = useState<Record<string, string>>({});
   const [btInitialMode, setBtInitialMode] = useState<'bluetooth' | 'nearby'>('bluetooth');
   const [guestBluetoothOpen, setGuestBluetoothOpen] = useState(false);
 
   // Modals & deep links
   const [connectModalOpen, setConnectModalOpen] = useState(false);
-  const [connectModalTab, setConnectModalTab] = useState<'gmail' | 'phone' | 'invite'>('gmail');
+  const [connectModalTab, setConnectModalTab] = useState<'gmail' | 'invite'>('gmail');
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [peerProfileModalOpen, setPeerProfileModalOpen] = useState(false);
   const [statusCreateOpen, setStatusCreateOpen] = useState(false);
@@ -239,6 +242,7 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const notifContainerRef = useRef<HTMLDivElement>(null);
   const handledDeepLinkRef = useRef(false);
   const lastTypingSentAtRef = useRef<number>(0);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -299,6 +303,49 @@ export default function App() {
     }
   };
 
+  const handleTestAlert = () => {
+    unlockAudioNow();
+    void playIncomingTone();
+    const alertData = {
+      chatId: activeChatId || chats[0]?.id || '',
+      senderName: t(lang, 'testAlertTitle'),
+      text: t(lang, 'testAlertBody'),
+    };
+    setIncomingBanner(alertData);
+    if (bannerTimeoutRef.current !== null) {
+      window.clearTimeout(bannerTimeoutRef.current);
+    }
+    bannerTimeoutRef.current = window.setTimeout(() => {
+      setIncomingBanner(null);
+    }, 4500);
+    if (notifPermission === 'granted') {
+      void showBackgroundNotification({
+        title: alertData.senderName,
+        body: alertData.text,
+        chatId: alertData.chatId,
+      });
+    }
+    setNotifOpen(false);
+  };
+
+  useEffect(() => {
+    if (!notifOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (notifContainerRef.current && !notifContainerRef.current.contains(e.target as Node)) {
+        setNotifOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNotifOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [notifOpen]);
+
   // Apply dark mode class to <html>
   useEffect(() => {
     const root = document.documentElement;
@@ -336,6 +383,7 @@ export default function App() {
         if (priv.language === 'bn' || priv.language === 'en') {
           setLang(priv.language);
         }
+        await claimPendingEmailChats({ user, currentUser: pub }).catch(() => 0);
       } catch (err) {
         setAuthError(formatFriendlyError(err));
       } finally {
@@ -540,7 +588,7 @@ export default function App() {
       }
 
       setChats(list);
-    });
+    }, (errMsg) => setChatError(errMsg));
     return () => unsub();
   }, [publicProfile]);
 
@@ -557,65 +605,69 @@ export default function App() {
     const knownInChatIds = new Set<string>();
     const arrivalTimers: number[] = [];
 
-    const unsubMsgs = subscribeChatMessages(activeChatId, (msgs) => {
-      if (!initialSnapshotDelivered) {
-        initialSnapshotDelivered = true;
-        loadedChatMessagesRef.current.add(activeChatId);
-        for (const m of msgs) {
-          knownInChatIds.add(m.id);
-          seenMessageIdsRef.current.add(m.id);
-        }
-      } else {
-        let hasIncomingPeerMsg = false;
-        const freshArrivalIds: string[] = [];
-        for (const m of msgs) {
-          if (!knownInChatIds.has(m.id)) {
+    const unsubMsgs = subscribeChatMessages(
+      activeChatId,
+      (msgs) => {
+        if (!initialSnapshotDelivered) {
+          initialSnapshotDelivered = true;
+          loadedChatMessagesRef.current.add(activeChatId);
+          for (const m of msgs) {
             knownInChatIds.add(m.id);
-            const isUnseen = !seenMessageIdsRef.current.has(m.id);
             seenMessageIdsRef.current.add(m.id);
-            if (m.senderId !== publicProfile.uid) {
-              freshArrivalIds.push(m.id);
-              if (isUnseen) {
-                hasIncomingPeerMsg = true;
+          }
+        } else {
+          let hasIncomingPeerMsg = false;
+          const freshArrivalIds: string[] = [];
+          for (const m of msgs) {
+            if (!knownInChatIds.has(m.id)) {
+              knownInChatIds.add(m.id);
+              const isUnseen = !seenMessageIdsRef.current.has(m.id);
+              seenMessageIdsRef.current.add(m.id);
+              if (m.senderId !== publicProfile.uid) {
+                freshArrivalIds.push(m.id);
+                if (isUnseen) {
+                  hasIncomingPeerMsg = true;
+                }
               }
             }
           }
-        }
-        if (freshArrivalIds.length > 0) {
-          setJustArrivedIds((prev) => {
-            const next = new Set(prev);
-            freshArrivalIds.forEach((id) => next.add(id));
-            return next;
-          });
-          const timer = window.setTimeout(() => {
+          if (freshArrivalIds.length > 0) {
             setJustArrivedIds((prev) => {
               const next = new Set(prev);
-              let changed = false;
-              freshArrivalIds.forEach((id) => {
-                if (next.delete(id)) changed = true;
-              });
-              return changed ? next : prev;
+              freshArrivalIds.forEach((id) => next.add(id));
+              return next;
             });
-          }, 1800);
-          arrivalTimers.push(timer);
+            const timer = window.setTimeout(() => {
+              setJustArrivedIds((prev) => {
+                const next = new Set(prev);
+                let changed = false;
+                freshArrivalIds.forEach((id) => {
+                  if (next.delete(id)) changed = true;
+                });
+                return changed ? next : prev;
+              });
+            }, 1800);
+            arrivalTimers.push(timer);
+          }
+          if (hasIncomingPeerMsg) {
+            void playIncomingTone();
+          }
         }
-        if (hasIncomingPeerMsg) {
-          void playIncomingTone();
-        }
-      }
 
-      // Prune confirmed optimistic messages
-      const confirmedIds = new Set(msgs.map((m) => m.id));
-      setOptimisticByChat((prev) => {
-        const current = prev[activeChatId];
-        if (!current || current.length === 0) return prev;
-        const remaining = current.filter((m) => !confirmedIds.has(m.id));
-        if (remaining.length === current.length) return prev;
-        return { ...prev, [activeChatId]: remaining };
-      });
+        // Prune confirmed optimistic messages
+        const confirmedIds = new Set(msgs.map((m) => m.id));
+        setOptimisticByChat((prev) => {
+          const current = prev[activeChatId];
+          if (!current || current.length === 0) return prev;
+          const remaining = current.filter((m) => !confirmedIds.has(m.id));
+          if (remaining.length === current.length) return prev;
+          return { ...prev, [activeChatId]: remaining };
+        });
 
-      setMessages(msgs);
-    });
+        setMessages(msgs);
+      },
+      (errMsg) => setChatError(errMsg)
+    );
     const unsubReacts = subscribeChatReactions(activeChatId, setReactions);
     const unsubTyping = subscribeTypingStatus(activeChatId, (statuses) => {
       setNowTick(Date.now());
@@ -730,6 +782,11 @@ export default function App() {
       );
     });
   }, [chats, filterTab, searchQuery]);
+
+  const unreadChats = useMemo(
+    () => chats.filter((c) => unreadChatIds.has(c.id)),
+    [chats, unreadChatIds]
+  );
 
   const handleGoogleSignIn = async () => {
     unlockAudioNow();
@@ -869,12 +926,7 @@ export default function App() {
       attachmentMime: attachmentToSend ? attachmentToSend.attachmentMime : '',
       attachmentSize: attachmentToSend ? attachmentToSend.attachmentSize : 0,
       attachmentData: attachmentToSend ? attachmentToSend.attachmentData : '',
-      transport:
-        targetChat.channel === 'gmail'
-          ? 'gmail'
-          : targetChat.channel === 'phone'
-          ? 'phone'
-          : 'nearby',
+      transport: targetChat.channel === 'gmail' ? 'gmail' : 'nearby',
       replyToText: replySnippet,
       createdAt: null,
       optimistic: true,
@@ -939,7 +991,7 @@ export default function App() {
       try {
         await navigator.share({
           title: 'KothaLink Chat',
-          text: 'Chat with me on KothaLink via Gmail, Mobile Number, or Nearby:',
+          text: 'Chat with me on KothaLink via Gmail, Invite Code, or Nearby:',
           url,
         });
         return;
@@ -1063,7 +1115,7 @@ export default function App() {
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
             <span className="whitespace-nowrap shrink-0">Gmail</span>
-            <span className="whitespace-nowrap shrink-0">Mobile Number</span>
+            <span className="whitespace-nowrap shrink-0">Invite Code</span>
             <span className="whitespace-nowrap shrink-0">Nearby QR</span>
             <span className="whitespace-nowrap shrink-0">Web Bluetooth</span>
           </nav>
@@ -1100,23 +1152,24 @@ export default function App() {
                 <KothaLinkLogo variant="hero" />
                 <div className="space-y-3 pt-1">
                   <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                    Gmail · Mobile Number · Bluetooth · Nearby P2P
+                    Gmail · Invite Code · Bluetooth · Nearby P2P
                   </p>
                   <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 dark:text-white text-balance">
                     {t(lang, 'tagline')}
                   </h1>
                   <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300 leading-relaxed max-w-xl">
-                    Sign in once with your Gmail account, optionally link your mobile number so friends can find you by phone, or pair nearby devices directly over Web Bluetooth and 6-digit QR rooms.
+                    Sign in once with your Gmail account and chat effortlessly using Gmail addresses, invite codes, or pair nearby devices directly over Web Bluetooth and 6-digit QR rooms.
                   </p>
                 </div>
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {authError && (
-                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-xs text-red-700 dark:text-red-300">
+                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-xs text-red-700 dark:text-red-300 leading-relaxed">
                     {authError}
                   </div>
                 )}
+
                 <motion.button
                   type="button"
                   whileTap={{ scale: 0.98 }}
@@ -1127,6 +1180,7 @@ export default function App() {
                   <Mail className="w-4 h-4" />
                   {authLoading ? t(lang, 'signingIn') : t(lang, 'signInGoogle')}
                 </motion.button>
+
                 <motion.button
                   type="button"
                   whileTap={{ scale: 0.98 }}
@@ -1160,14 +1214,14 @@ export default function App() {
 
               <div className="py-5 flex items-start gap-4">
                 <div className="w-10 h-10 rounded-xl bg-emerald-600/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
-                  <Phone className="w-5 h-5" />
+                  <KeyRound className="w-5 h-5" />
                 </div>
                 <div className="space-y-1">
                   <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                    {t(lang, 'cardPhoneTitle')}
+                    {t(lang, 'cardCodeTitle')}
                   </h2>
                   <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                    {t(lang, 'cardPhoneDesc')}
+                    {t(lang, 'cardCodeDesc')}
                   </p>
                 </div>
               </div>
@@ -1194,7 +1248,9 @@ export default function App() {
   }
 
   const isMobileDetailActive =
-    workspaceView === 'chat' || workspaceView === 'bluetooth' || workspaceView === 'gemini';
+    workspaceView === 'chat' ||
+    workspaceView === 'bluetooth' ||
+    workspaceView === 'gemini';
 
   return (
     <MotionConfig reducedMotion="user">
@@ -1213,7 +1269,13 @@ export default function App() {
             <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-blue-200 dark:border-blue-800 rounded-2xl shadow-lg p-3 flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => openChat(incomingBanner.chatId)}
+                onClick={() => {
+                  if (incomingBanner.chatId) {
+                    openChat(incomingBanner.chatId);
+                  } else {
+                    setIncomingBanner(null);
+                  }
+                }}
                 className="flex-1 min-w-0 flex items-center gap-3 text-left"
               >
                 <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
@@ -1261,27 +1323,175 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-1 shrink-0">
-            {notifPermission !== 'unsupported' && (
+            {/* Workable Interactive Notification Center Bell */}
+            <div ref={notifContainerRef} className="relative">
               <button
                 type="button"
-                onClick={handleRequestBgNotifications}
-                title={
-                  notifPermission === 'granted'
-                    ? t(lang, 'bgAlertsActive')
-                    : notifPermission === 'denied'
-                    ? t(lang, 'bgAlertsBlocked')
-                    : t(lang, 'enableBgAlerts')
-                }
-                aria-label={t(lang, 'enableBgAlerts')}
-                className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors"
+                onClick={() => {
+                  unlockAudioNow();
+                  setNotifOpen((prev) => !prev);
+                }}
+                title={t(lang, 'notificationsTitle')}
+                aria-label={t(lang, 'notificationsTitle')}
+                aria-expanded={notifOpen}
+                className={`relative min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl transition-colors ${
+                  notifOpen
+                    ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900'
+                }`}
               >
-                {notifPermission === 'granted' ? (
-                  <BellRing className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                {unreadChats.length > 0 || notifPermission === 'granted' ? (
+                  <BellRing
+                    className={`w-4 h-4 ${
+                      unreadChats.length > 0
+                        ? 'text-amber-500 animate-pulse'
+                        : 'text-emerald-600 dark:text-emerald-400'
+                    }`}
+                  />
                 ) : (
-                  <Bell className="w-4 h-4 text-amber-500" />
+                  <Bell className="w-4 h-4 text-slate-600 dark:text-slate-300" />
+                )}
+                {unreadChats.length > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-white dark:ring-slate-950">
+                    {unreadChats.length > 9 ? '9+' : unreadChats.length}
+                  </span>
                 )}
               </button>
-            )}
+
+              <AnimatePresence>
+                {notifOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 6, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                    transition={{ duration: 0.15 }}
+                    className="absolute right-0 mt-2 w-[290px] sm:w-[320px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl z-40 overflow-hidden"
+                  >
+                    <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <BellRing className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">
+                          {t(lang, 'notificationsTitle')}
+                        </span>
+                        {unreadChats.length > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 text-[10px] font-bold">
+                            {unreadChats.length}
+                          </span>
+                        )}
+                      </div>
+                      {unreadChats.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setUnreadChatIds(new Set())}
+                          className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                        >
+                          {t(lang, 'markAllRead')}
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800">
+                      {unreadChats.length === 0 ? (
+                        <div className="px-4 py-5 text-center text-xs text-slate-500 dark:text-slate-400">
+                          {t(lang, 'noUnreadNotifications')}
+                        </div>
+                      ) : (
+                        unreadChats.map((c) => {
+                          const chatName = getChatDisplayName(c);
+                          const peer = getChatPeerProfile(c);
+                          return (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => {
+                                openChat(c.id);
+                                setNotifOpen(false);
+                              }}
+                              className="w-full px-3.5 py-2.5 flex items-center gap-2.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800/70 transition-colors"
+                            >
+                              <UserAvatar
+                                name={chatName}
+                                photoUrl={peer?.photoUrl}
+                                size="sm"
+                                isOnline={isPeerOnline(peer, nowTick)}
+                                hasUnread
+                                ringColorClass="ring-white dark:ring-slate-900"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                                    {chatName}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 shrink-0 font-mono-tabular">
+                                    {formatTime(c.lastMessageAt)}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
+                                  {c.lastMessageText || t(lang, 'tapToOpen')}
+                                </p>
+                              </div>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="text-slate-600 dark:text-slate-300 font-medium">
+                          {t(lang, 'soundAlertsLabel')}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={toggleSound}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                            soundOn
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                          }`}
+                        >
+                          {soundOn ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+
+                      {notifPermission !== 'unsupported' && (
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="text-slate-600 dark:text-slate-300 font-medium">
+                            {t(lang, 'pushAlertsLabel')}
+                          </span>
+                          {notifPermission === 'granted' ? (
+                            <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                              ✓ Active
+                            </span>
+                          ) : notifPermission === 'denied' ? (
+                            <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                              Blocked
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={handleRequestBgNotifications}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold"
+                            >
+                              Enable
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={handleTestAlert}
+                        className="w-full min-h-[34px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 transition-colors"
+                      >
+                        <BellRing className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        <span>{t(lang, 'testAlertBtn')}</span>
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
             <button
               type="button"
               onClick={toggleSound}
@@ -1317,57 +1527,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Organized Primary Action Toolbar */}
-        <div className="px-3 pt-3 grid grid-cols-3 gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => {
-              unlockAudioNow();
-              setConnectModalTab('gmail');
-              setConnectModalOpen(true);
-            }}
-            className="min-h-[44px] px-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap transition-all shadow-sm shadow-blue-600/20"
-          >
-            <MessageSquarePlus className="w-4 h-4 shrink-0" />
-            <span className="truncate">{t(lang, 'newChat')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              unlockAudioNow();
-              setActiveChatId(null);
-              setBtInitialMode('bluetooth');
-              setWorkspaceView('bluetooth');
-            }}
-            className={`min-h-[44px] px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors ${
-              workspaceView === 'bluetooth'
-                ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300'
-                : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            <Bluetooth className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-            <span className="truncate">BT & QR</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              unlockAudioNow();
-              setActiveChatId(null);
-              setWorkspaceView('gemini');
-            }}
-            className={`min-h-[44px] px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors ${
-              workspaceView === 'gemini'
-                ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300'
-                : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            <Bot className="w-4 h-4 shrink-0" />
-            <span className="truncate">Gemini AI</span>
-          </button>
-        </div>
-
         {/* Search & Channel Filter */}
         <div className="p-3 space-y-2.5 border-b border-slate-100 dark:border-slate-900 shrink-0">
           <div className="relative">
@@ -1381,13 +1540,12 @@ export default function App() {
             />
           </div>
 
-          <div className="grid grid-cols-4 gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl">
+          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl">
             {(
               [
                 { id: 'all', label: t(lang, 'allChats') },
                 { id: 'gmail', label: t(lang, 'gmailTab') },
-                { id: 'phone', label: t(lang, 'phoneTab') },
-                { id: 'nearby', label: 'BT/P2P' },
+                { id: 'nearby', label: 'BT/Code' },
               ] as const
             ).map((tab) => (
               <button
@@ -1538,7 +1696,7 @@ export default function App() {
         })()}
 
         {/* Chat List with Blinking Green Online Ring + Red Offline Dot + Blinking Yellow Unread Dot */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-1 pb-20 md:pb-3">
+        <div className="flex-1 overflow-y-auto p-3 space-y-1">
           {filteredChats.length === 0 ? (
             <div className="py-10 px-4 text-center space-y-3">
               <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
@@ -1625,7 +1783,7 @@ export default function App() {
                         {chat.channel === 'gmail'
                           ? 'Gmail'
                           : chat.channel === 'phone'
-                          ? 'Mobile'
+                          ? 'Code'
                           : 'Nearby'}
                       </span>
                       <span aria-hidden="true">·</span>
@@ -1659,7 +1817,7 @@ export default function App() {
               <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
                 {publicProfile.bio?.trim()
                   ? publicProfile.bio
-                  : privateInfo.phoneNumber || privateInfo.email}
+                  : privateInfo.email}
               </div>
             </div>
           </button>
@@ -1673,60 +1831,64 @@ export default function App() {
           </button>
         </div>
 
-        {/* Mobile Bottom Tab Bar (Thumb Zone, <= 15% height) */}
-        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 h-16 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 grid grid-cols-4 items-center">
+        {/* Unified Bottom Action Dock (Single Location on Both Mobile & Desktop) */}
+        <nav className="shrink-0 h-16 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 grid grid-cols-4 items-center">
           <button
             type="button"
             onClick={() => setWorkspaceView('hub')}
-            className={`h-full flex flex-col items-center justify-center gap-0.5 ${
+            className={`h-full flex flex-col items-center justify-center gap-0.5 transition-colors ${
               workspaceView === 'hub'
                 ? 'text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-400'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
             }`}
           >
-            <Mail className="w-5 h-5" />
-            <span className="text-[11px] font-medium whitespace-nowrap">{t(lang, 'backToChats')}</span>
+            <MessageSquarePlus className="w-5 h-5" />
+            <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'backToChats')}</span>
           </button>
           <button
             type="button"
             onClick={() => {
+              unlockAudioNow();
               setConnectModalTab('gmail');
               setConnectModalOpen(true);
             }}
-            className="h-full flex flex-col items-center justify-center gap-0.5 text-slate-600 dark:text-slate-400"
+            className="h-full flex flex-col items-center justify-center gap-0.5 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
           >
-            <MessageSquarePlus className="w-5 h-5" />
-            <span className="text-[11px] font-medium whitespace-nowrap">{t(lang, 'newChat')}</span>
+            <UserPlus className="w-5 h-5" />
+            <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'newChat')}</span>
           </button>
           <button
             type="button"
             onClick={() => {
+              unlockAudioNow();
+              setActiveChatId(null);
               setBtInitialMode('bluetooth');
               setWorkspaceView('bluetooth');
             }}
-            className={`h-full flex flex-col items-center justify-center gap-0.5 ${
+            className={`h-full flex flex-col items-center justify-center gap-0.5 transition-colors ${
               workspaceView === 'bluetooth'
                 ? 'text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-400'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
             }`}
           >
             <Bluetooth className="w-5 h-5" />
-            <span className="text-[11px] font-medium whitespace-nowrap">BT / QR</span>
+            <span className="text-[10px] font-medium whitespace-nowrap">BT / QR</span>
           </button>
           <button
             type="button"
             onClick={() => {
+              unlockAudioNow();
               setActiveChatId(null);
               setWorkspaceView('gemini');
             }}
-            className={`h-full flex flex-col items-center justify-center gap-0.5 ${
+            className={`h-full flex flex-col items-center justify-center gap-0.5 transition-colors ${
               workspaceView === 'gemini'
                 ? 'text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-400'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
             }`}
           >
-            <Bot className="w-5 h-5" />
-            <span className="text-[11px] font-medium whitespace-nowrap">Gemini AI</span>
+            <GeminiLogo variant="icon" size={20} />
+            <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'geminiAssistantTitle')}</span>
           </button>
         </nav>
       </aside>
@@ -1828,10 +1990,11 @@ export default function App() {
                         setActiveChatId(null);
                         setWorkspaceView('hub');
                       }}
-                      aria-label="Back to chats"
-                      className="md:hidden min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 shrink-0"
+                      aria-label={t(lang, 'backBtn')}
+                      className="min-h-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold shrink-0 transition-colors"
                     >
-                      <ArrowLeft className="w-5 h-5" />
+                      <ArrowLeft className="w-4 h-4 shrink-0" />
+                      <span className="hidden sm:inline">{t(lang, 'backBtn')}</span>
                     </button>
                     <button
                       type="button"
@@ -1888,7 +2051,7 @@ export default function App() {
                               {activeChat.channel === 'gmail'
                                 ? 'Gmail'
                                 : activeChat.channel === 'phone'
-                                ? 'Mobile'
+                                ? 'Code'
                                 : 'Nearby'}
                             </span>
                             <span className="hidden sm:inline" aria-hidden="true">·</span>
@@ -1958,6 +2121,21 @@ export default function App() {
 
                     {activeChat.inviteCode && activeChat.participantIds.length === 1 && (
                       <>
+                        {activeChat.channel === 'gmail' && (
+                          <a
+                            href={`mailto:${encodeURIComponent(
+                              pendingEmailsByChat[activeChat.id] || ''
+                            )}?subject=${encodeURIComponent(
+                              `${publicProfile.displayName} sent you a message on KothaLink`
+                            )}&body=${encodeURIComponent(
+                              `Hi! I sent you a message on KothaLink.\n\nSign in with your Gmail (${pendingEmailsByChat[activeChat.id] || 'this email'}) at ${getPublicAppOrigin()} to see it right away, or use invite link: ${getInviteUrl(activeChat.inviteCode)}`
+                            )}`}
+                            className="min-h-[40px] px-2.5 sm:px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 text-xs font-medium text-blue-700 dark:text-blue-300 flex items-center gap-1.5 whitespace-nowrap"
+                          >
+                            <Mail className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">{t(lang, 'notifyViaEmail')}</span>
+                          </a>
+                        )}
                         <button
                           type="button"
                           onClick={() => copyChatInviteLink(activeChat)}
@@ -1990,13 +2168,23 @@ export default function App() {
               );
             })()}
 
+            {/* Pending Gmail Auto-Delivery Info Strip */}
+            {activeChat.channel === 'gmail' && activeChat.participantIds.length === 1 && (
+              <div className="px-4 sm:px-6 py-2 bg-blue-50/90 dark:bg-blue-950/30 border-b border-blue-100 dark:border-blue-900/50 text-xs text-blue-800 dark:text-blue-200 flex items-center gap-2 shrink-0">
+                <Mail className="w-3.5 h-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+                <span className="leading-snug">{t(lang, 'pendingAutoDeliverNote')}</span>
+              </div>
+            )}
+
             {/* Message Feed */}
             <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 bg-slate-50/50 dark:bg-slate-950">
               {renderedMessages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-4">
                   <p className="text-sm text-slate-500 dark:text-slate-400">
                     Start chatting with {getChatDisplayName(activeChat)}.
-                    {activeChat.participantIds.length === 1 && activeChat.inviteCode
+                    {activeChat.channel === 'gmail' && activeChat.participantIds.length === 1
+                      ? ` ${t(lang, 'pendingAutoDeliverNote')}`
+                      : activeChat.participantIds.length === 1 && activeChat.inviteCode
                       ? ` Share invite code ${activeChat.inviteCode} so they can join directly.`
                       : ''}
                   </p>
@@ -2397,31 +2585,6 @@ export default function App() {
                 </p>
               </div>
 
-              {!privateInfo.phoneNumber && (
-                <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-9 h-9 rounded-xl bg-emerald-600/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
-                      <Phone className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold text-slate-900 dark:text-white">
-                        {t(lang, 'linkPhoneTitle')}
-                      </div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400">
-                        {t(lang, 'linkPhoneHint')}
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setProfileModalOpen(true)}
-                    className="min-h-[40px] px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-medium whitespace-nowrap shrink-0"
-                  >
-                    Link Number
-                  </button>
-                </div>
-              )}
-
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                 {/* Gmail Card */}
                 <motion.div
@@ -2455,7 +2618,7 @@ export default function App() {
                   </motion.button>
                 </motion.div>
 
-                {/* Mobile Number Card */}
+                {/* Invite Code Card */}
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -2465,25 +2628,25 @@ export default function App() {
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-emerald-600/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
-                      <Phone className="w-5 h-5" />
+                      <KeyRound className="w-5 h-5" />
                     </div>
                     <h2 className="text-base font-bold text-slate-900 dark:text-white">
-                      {t(lang, 'cardPhoneTitle')}
+                      {t(lang, 'cardCodeTitle')}
                     </h2>
                     <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                      {t(lang, 'cardPhoneDesc')}
+                      {t(lang, 'cardCodeDesc')}
                     </p>
                   </div>
                   <motion.button
                     type="button"
                     whileTap={{ scale: 0.97 }}
                     onClick={() => {
-                      setConnectModalTab('phone');
+                      setConnectModalTab('invite');
                       setConnectModalOpen(true);
                     }}
                     className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 dark:bg-slate-100 hover:bg-slate-800 dark:hover:bg-white text-white dark:text-slate-900 text-xs font-medium transition-colors whitespace-nowrap"
                   >
-                    {t(lang, 'cardPhoneAction')}
+                    {t(lang, 'cardCodeAction')}
                   </motion.button>
                 </motion.div>
 
@@ -2562,8 +2725,8 @@ export default function App() {
                     }}
                     className="min-h-[38px] px-3.5 rounded-xl bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 dark:hover:bg-slate-700 text-white text-xs font-medium flex items-center gap-2 whitespace-nowrap transition-colors"
                   >
-                    <Bot className="w-4 h-4" />
-                    Open Gemini Assistant
+                    <GeminiLogo variant="icon" size={16} />
+                    Open Gemini AI
                   </button>
                 </div>
               </div>
@@ -2595,7 +2758,12 @@ export default function App() {
                 setConnectModalOpen(false);
                 setDeepInviteCode('');
               }}
-              onChatReady={(chatId) => openChat(chatId)}
+              onChatReady={(chatId, meta) => {
+                if (meta?.pendingEmail) {
+                  setPendingEmailsByChat((prev) => ({ ...prev, [chatId]: meta.pendingEmail! }));
+                }
+                openChat(chatId);
+              }}
             />
           </motion.div>
         )}
@@ -2628,7 +2796,6 @@ export default function App() {
                         ...prev,
                         displayName: updates.displayName,
                         bio: updates.bio,
-                        hasPhone: Boolean(updates.phoneNumber),
                         showOnlineStatus: updates.showOnlineStatus,
                       }
                     : prev
@@ -2637,7 +2804,6 @@ export default function App() {
                   prev
                     ? {
                         ...prev,
-                        phoneNumber: updates.phoneNumber,
                         language: updates.language,
                       }
                     : prev
@@ -2758,7 +2924,18 @@ export default function App() {
               onClick={(e) => e.stopPropagation()}
               className="w-full max-w-3xl flex items-center justify-between text-white gap-3"
             >
-              <span className="text-sm font-medium truncate">{lightboxImage.name}</span>
+              <div className="flex items-center gap-2.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setLightboxImage(null)}
+                  aria-label={t(lang, 'backBtn')}
+                  className="min-h-[40px] px-3 rounded-xl bg-white/15 hover:bg-white/25 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>{t(lang, 'backBtn')}</span>
+                </button>
+                <span className="text-sm font-medium truncate">{lightboxImage.name}</span>
+              </div>
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"

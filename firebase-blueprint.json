@@ -154,6 +154,11 @@
           "maxLength": 16,
           "pattern": "^[a-zA-Z0-9_\\-]*$"
         },
+        "pendingRecipientHash": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]*$"
+        },
         "lastMessageText": {
           "type": "string",
           "maxLength": 200
@@ -712,6 +717,47 @@
         }
       },
       "required": ["senderId", "candidate", "createdAt"]
+    },
+    "PendingDelivery": {
+      "title": "PendingDelivery",
+      "description": "SHA-256 email-keyed pending delivery index allowing recipients to automatically claim queued chats and messages upon Gmail sign-in without storing raw PII.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "recipientHash": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "chatId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creatorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creatorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "recipientHash", "chatId", "creatorId", "creatorName", "createdAt"]
     }
   },
   "firestore": {
@@ -786,6 +832,10 @@
     "/calls/{callId}/candidates/{candidateId}": {
       "schema": { "$ref": "#/entities/CallCandidate" },
       "description": "ICE candidates exchanged during a call session."
+    },
+    "/pending_deliveries/{deliveryId}": {
+      "schema": { "$ref": "#/entities/PendingDelivery" },
+      "description": "SHA-256 recipient email index for auto-delivering queued chats when a user signs in with Gmail."
     }
   }
 }

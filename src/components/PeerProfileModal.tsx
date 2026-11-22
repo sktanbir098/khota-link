@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Loader2, Mail, Phone, Radio, Sparkles, Trash2, Video, Wifi, X } from 'lucide-react';
+import { ArrowLeft, Loader2, Mail, Phone, Radio, Sparkles, Trash2, Video, Wifi, X } from 'lucide-react';
 import { t } from '../lib/i18n';
 import { AppLanguage, CallMode, ChatRoom, UserPublicProfile, UserStatus } from '../types/chat';
 import { STATUS_GRADIENTS } from './StatusModal';
@@ -63,15 +63,25 @@ export const PeerProfileModal: React.FC<Props> = ({
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
         className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl max-h-[90dvh] flex flex-col"
       >
-        <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0">
-          <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-            {t(lang, 'peerProfileTitle')}
-          </h2>
+        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t(lang, 'backBtn')}
+              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shrink-0 transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white truncate">
+              {t(lang, 'peerProfileTitle')}
+            </h2>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
@@ -167,8 +177,6 @@ export const PeerProfileModal: React.FC<Props> = ({
             <div className="w-9 h-9 rounded-xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
               {chat.channel === 'gmail' ? (
                 <Mail className="w-4 h-4" />
-              ) : chat.channel === 'phone' ? (
-                <Phone className="w-4 h-4" />
               ) : (
                 <Wifi className="w-4 h-4" />
               )}
@@ -178,7 +186,7 @@ export const PeerProfileModal: React.FC<Props> = ({
                 {chat.channel === 'gmail'
                   ? 'Gmail Chat'
                   : chat.channel === 'phone'
-                  ? 'Mobile Number Chat'
+                  ? 'Invite Code Chat'
                   : 'Nearby Direct'}
               </div>
               <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-tabular truncate">

@@ -20,7 +20,10 @@ service cloud.firestore {
     }
 
     function isVerifiedUser() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+      return isSignedIn() && (
+        request.auth.token.email_verified == true
+        || ('phone_number' in request.auth.token && request.auth.token.phone_number is string && request.auth.token.phone_number.size() >= 6)
+      );
     }
 
     function isOwner(userId) {
@@ -29,6 +32,24 @@ service cloud.firestore {
 
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isEmailHashMatch(expectedHash) {
+      return isVerifiedUser()
+        && 'email' in request.auth.token
+        && request.auth.token.email is string
+        && expectedHash is string
+        && expectedHash.size() == 64
+        && hashing.sha256(request.auth.token.email.lower().toUtf8()).toHexString().lower() == expectedHash;
+    }
+
+    function isPhoneHashMatch(expectedHash) {
+      return isVerifiedUser()
+        && 'phone_number' in request.auth.token
+        && request.auth.token.phone_number is string
+        && expectedHash is string
+        && expectedHash.size() == 64
+        && hashing.sha256(request.auth.token.phone_number.toUtf8()).toHexString().lower() == expectedHash;
     }
 
     function isValidUserPublic(data, userId) {
@@ -79,7 +100,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'channel', 'title', 'targetHint', 'creatorId', 'creatorName',
-          'peerName', 'participantIds', 'inviteCode', 'lastMessageText',
+          'peerName', 'participantIds', 'inviteCode', 'pendingRecipientHash', 'lastMessageText',
           'lastMessageSenderId', 'lastMessageAt', 'createdAt', 'updatedAt'
         ])
         && data.id is string && data.id == chatId && isValidId(data.id)
@@ -91,6 +112,7 @@ service cloud.firestore {
         && data.peerName is string && data.peerName.size() <= 80
         && data.participantIds is list && data.participantIds.size() >= 1 && data.participantIds.size() <= 10 && data.participantIds[0] is string
         && data.inviteCode is string && data.inviteCode.size() <= 16 && data.inviteCode.matches('^[a-zA-Z0-9_\\-]*$')
+        && (!('pendingRecipientHash' in data) || (data.pendingRecipientHash is string && (data.pendingRecipientHash.size() == 0 || (data.pendingRecipientHash.size() == 64 && data.pendingRecipientHash.matches('^[a-f0-9]{64}$')))))
         && data.lastMessageText is string && data.lastMessageText.size() <= 200
         && data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 128
         && data.lastMessageAt is timestamp
@@ -396,7 +418,10 @@ service cloud.firestore {
 
     // 5. Persistent Chats
     match /chats/{chatId} {
-      allow get: if isSignedIn() && isValidId(chatId) && request.auth.uid in existing().participantIds;
+      allow get: if isSignedIn() && isValidId(chatId) && (
+        request.auth.uid in existing().participantIds
+        || ('pendingRecipientHash' in existing() && (isEmailHashMatch(existing().pendingRecipientHash) || isPhoneHashMatch(existing().pendingRecipientHash)))
+      );
       allow list: if isSignedIn() && request.auth.uid in resource.data.participantIds;
       allow create: if isVerifiedUser()
         && isValidId(chatId)
@@ -442,6 +467,18 @@ service cloud.firestore {
           (
             request.auth.uid == existing().creatorId
             && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'updatedAt'])
+          )
+          ||
+          // Action 4: Recipient auto-claims pending Gmail or Phone chat upon signing in with matching verified identity
+          (
+            !(request.auth.uid in existing().participantIds)
+            && 'pendingRecipientHash' in existing()
+            && (isEmailHashMatch(existing().pendingRecipientHash) || isPhoneHashMatch(existing().pendingRecipientHash))
+            && incoming().pendingRecipientHash == ''
+            && request.auth.uid in incoming().participantIds
+            && incoming().participantIds.hasAll(existing().participantIds)
+            && incoming().participantIds.size() == existing().participantIds.size() + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly(['participantIds', 'peerName', 'pendingRecipientHash', 'updatedAt'])
           )
         );
       allow delete: if isVerifiedUser() && isValidId(chatId) && request.auth.uid in existing().participantIds;
@@ -738,6 +775,50 @@ service cloud.firestore {
           && isCallMember(callId);
         allow update, delete: if false;
       }
+    }
+
+    // 11. Pending Gmail Deliveries (zero-PII SHA-256 index for auto-claiming queued chats upon sign-in)
+    function isValidPendingDelivery(data, deliveryId) {
+      return data.keys().hasAll(['id', 'recipientHash', 'chatId', 'creatorId', 'creatorName', 'createdAt'])
+        && data.keys().hasOnly(['id', 'recipientHash', 'chatId', 'creatorId', 'creatorName', 'createdAt'])
+        && data.id is string && data.id == deliveryId && isValidId(data.id)
+        && data.recipientHash is string && data.recipientHash.size() == 64 && data.recipientHash.matches('^[a-f0-9]{64}$')
+        && data.chatId is string && isValidId(data.chatId)
+        && data.creatorId is string && isValidId(data.creatorId)
+        && data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 80
+        && data.createdAt is timestamp;
+    }
+
+    match /pending_deliveries/{deliveryId} {
+      allow get: if isVerifiedUser() && isValidId(deliveryId) && (
+        existing().creatorId == request.auth.uid
+        || isEmailHashMatch(existing().recipientHash)
+        || isPhoneHashMatch(existing().recipientHash)
+      );
+      allow list: if isVerifiedUser() && (
+        (
+          'email' in request.auth.token
+          && request.auth.token.email is string
+          && resource.data.recipientHash == hashing.sha256(request.auth.token.email.lower().toUtf8()).toHexString().lower()
+        )
+        || (
+          'phone_number' in request.auth.token
+          && request.auth.token.phone_number is string
+          && resource.data.recipientHash == hashing.sha256(request.auth.token.phone_number.toUtf8()).toHexString().lower()
+        )
+      );
+      allow create: if isVerifiedUser()
+        && isValidId(deliveryId)
+        && isValidPendingDelivery(incoming(), deliveryId)
+        && incoming().creatorId == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/chats/$(incoming().chatId));
+      allow update: if false;
+      allow delete: if isVerifiedUser() && isValidId(deliveryId) && (
+        existing().creatorId == request.auth.uid
+        || isEmailHashMatch(existing().recipientHash)
+        || isPhoneHashMatch(existing().recipientHash)
+      );
     }
   }
 }

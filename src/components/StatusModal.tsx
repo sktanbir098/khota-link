@@ -1,13 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
+  ArrowLeft,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Heart,
   ImagePlus,
   Loader2,
   MessageCircle,
   Pause,
+  Play,
   Send,
   Trash2,
   Type,
@@ -46,7 +49,8 @@ export const STATUS_GRADIENTS: Record<StatusBgGradient, string> = {
 };
 
 const GRADIENT_KEYS: StatusBgGradient[] = ['blue', 'emerald', 'amber', 'rose', 'slate'];
-const STORY_DURATION_MS = 6500;
+const STORY_DURATION_MS = 8500;
+const STATUS_24H_MS = 24 * 60 * 60 * 1000;
 
 interface FloatingBurst {
   id: number;
@@ -61,6 +65,26 @@ function formatRelativeTime(ts: { toMillis?: () => number } | null | undefined):
   if (diff < 60_000) return 'Just now';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   return `${Math.floor(diff / 3_600_000)}h ago`;
+}
+
+function formatRemaining24h(
+  createdAt: { toMillis?: () => number } | null | undefined,
+  expiresAt: { toMillis?: () => number } | null | undefined,
+  lang: AppLanguage
+): string {
+  const now = Date.now();
+  const createdMs = createdAt?.toMillis?.();
+  const expiryMs = Math.max(
+    expiresAt?.toMillis?.() ?? 0,
+    createdMs ? createdMs + STATUS_24H_MS : now + STATUS_24H_MS
+  );
+  const remMs = Math.max(0, expiryMs - now);
+  const hrs = Math.floor(remMs / 3_600_000);
+  const mins = Math.max(1, Math.floor((remMs % 3_600_000) / 60_000));
+  if (lang === 'bn') {
+    return hrs > 0 ? `${hrs}ঘ বাকি` : `${mins}মি বাকি`;
+  }
+  return hrs > 0 ? `${hrs}h left` : `${mins}m left`;
 }
 
 interface CreateProps {
@@ -108,6 +132,7 @@ export const StatusModal: React.FC<Props> = (props) => {
   const [commentInput, setCommentInput] = useState('');
   const [sendingComment, setSendingComment] = useState(false);
   const [holdingStory, setHoldingStory] = useState(false);
+  const [manualPaused, setManualPaused] = useState(false);
   const [bursts, setBursts] = useState<FloatingBurst[]>([]);
   const [progressRatio, setProgressRatio] = useState(0);
 
@@ -121,6 +146,7 @@ export const StatusModal: React.FC<Props> = (props) => {
   const currentStatusId = currentViewStatus?.id || '';
 
   const isPaused =
+    manualPaused ||
     commentsOpen ||
     likesOpen ||
     holdingStory ||
@@ -159,11 +185,19 @@ export const StatusModal: React.FC<Props> = (props) => {
       setComments([]);
       return;
     }
-    const unsubReacts = subscribeStatusReactions(currentStatusId, (list) => {
-      setReactions(list);
-      setOptimisticEmoji(undefined);
-    });
-    const unsubComments = subscribeStatusComments(currentStatusId, setComments);
+    const unsubReacts = subscribeStatusReactions(
+      currentStatusId,
+      (list) => {
+        setReactions(list);
+        setOptimisticEmoji(undefined);
+      },
+      (msg) => setError(msg)
+    );
+    const unsubComments = subscribeStatusComments(
+      currentStatusId,
+      setComments,
+      (msg) => setError(msg)
+    );
     return () => {
       unsubReacts();
       unsubComments();
@@ -327,8 +361,16 @@ export const StatusModal: React.FC<Props> = (props) => {
               ))}
             </div>
 
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <button
+                  type="button"
+                  onClick={props.onClose}
+                  aria-label={t(props.lang, 'backBtn')}
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl bg-white/15 hover:bg-white/25 text-white shrink-0 transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
                 <UserAvatar
                   name={status.displayName}
                   photoUrl={status.photoUrl}
@@ -343,13 +385,26 @@ export const StatusModal: React.FC<Props> = (props) => {
                       <Pause className="w-3 h-3 text-white/75 shrink-0" aria-label="Paused" />
                     )}
                   </div>
-                  <div className="text-[11px] text-white/75 font-mono-tabular">
-                    {formatRelativeTime(status.createdAt)}
+                  <div className="text-[11px] text-white/80 font-mono-tabular flex items-center gap-1.5">
+                    <span>{formatRelativeTime(status.createdAt)}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="inline-flex items-center gap-0.5 text-emerald-300">
+                      <Clock className="w-2.5 h-2.5" />
+                      {formatRemaining24h(status.createdAt, status.expiresAt, props.lang)}
+                    </span>
                   </div>
                 </div>
               </div>
 
               <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setManualPaused((v) => !v)}
+                  aria-label={manualPaused ? 'Resume story' : 'Pause story'}
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl bg-white/15 hover:bg-white/25 text-white"
+                >
+                  {manualPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                </button>
                 {isOwn && (
                   <button
                     type="button"
@@ -799,15 +854,30 @@ export const StatusModal: React.FC<Props> = (props) => {
         transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
         className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl flex flex-col max-h-[90vh]"
       >
-        <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-          <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-            {t(props.lang, 'addStatus')}
-          </h2>
+        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={props.onClose}
+              aria-label={t(props.lang, 'backBtn')}
+              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shrink-0 transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="min-w-0">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white truncate">
+                {t(props.lang, 'addStatus')}
+              </h2>
+              <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
+                {t(props.lang, 'statusActive24h')}
+              </p>
+            </div>
+          </div>
           <button
             type="button"
             onClick={props.onClose}
             aria-label="Close"
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
