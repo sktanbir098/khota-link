@@ -1,0 +1,791 @@
+{
+  "entities": {
+    "UserPublicProfile": {
+      "title": "UserPublicProfile",
+      "description": "Publicly visible non-PII user profile for rendering chat participants.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "bio": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "hasPhone": {
+          "type": "boolean"
+        },
+        "showOnlineStatus": {
+          "type": "boolean"
+        },
+        "onlineStatus": {
+          "type": "string",
+          "enum": ["online", "away", "offline"]
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "photoUrl", "bio", "hasPhone", "onlineStatus", "lastSeenAt", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Strictly owner-only private PII containing user email, linked phone number, and preferences.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "phoneNumber": {
+          "type": "string",
+          "maxLength": 24,
+          "pattern": "^(\\+[0-9]{6,15})?$"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "bn"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "phoneNumber", "language", "updatedAt"]
+    },
+    "DirectoryEntry": {
+      "title": "DirectoryEntry",
+      "description": "SHA-256 keyed lookup document mapping hashed Gmail or E.164 phone number to public UID without storing raw PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "photoUrl", "updatedAt"]
+    },
+    "ChatRoom": {
+      "title": "ChatRoom",
+      "description": "Persistent chat conversation initiated via Gmail, Mobile Number, or Nearby link.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "channel": {
+          "type": "string",
+          "enum": ["gmail", "phone", "nearby"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "targetHint": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "creatorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creatorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "peerName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "participantIds": {
+          "type": "array"
+        },
+        "inviteCode": {
+          "type": "string",
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]*$"
+        },
+        "lastMessageText": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "lastMessageSenderId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "lastMessageAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "channel", "title", "targetHint", "creatorId", "creatorName", "peerName", "participantIds", "inviteCode", "lastMessageText", "lastMessageSenderId", "lastMessageAt", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Individual text or attachment message inside a chat room.",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "text": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "attachmentType": {
+          "type": "string",
+          "enum": ["none", "image", "file"]
+        },
+        "attachmentName": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "attachmentMime": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "attachmentSize": {
+          "type": "integer"
+        },
+        "attachmentData": {
+          "type": "string",
+          "maxLength": 800000
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["gmail", "phone", "internet", "nearby", "bluetooth"]
+        },
+        "replyToText": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "chatId", "senderId", "senderName", "text",
+        "attachmentType", "attachmentName", "attachmentMime", "attachmentSize", "attachmentData",
+        "transport", "replyToText", "createdAt"
+      ]
+    },
+    "ChatInvite": {
+      "title": "ChatInvite",
+      "description": "Exact-code invite entry allowing a recipient to join a pending chat.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chatId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creatorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creatorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "channel": {
+          "type": "string",
+          "enum": ["gmail", "phone", "nearby"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["code", "chatId", "creatorId", "creatorName", "channel", "createdAt"]
+    },
+    "NearbyRoom": {
+      "title": "NearbyRoom",
+      "description": "6-digit code room for WebRTC Peer-to-Peer signaling and nearby direct chat.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 16,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "guestUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "guestName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "offerSdp": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "answerSdp": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "paired", "closed"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["code", "hostUid", "hostName", "guestUid", "guestName", "offerSdp", "answerSdp", "status", "createdAt", "updatedAt"]
+    },
+    "NearbySignal": {
+      "title": "NearbySignal",
+      "description": "WebRTC ICE candidate trickle message within a nearby room.",
+      "type": "object",
+      "properties": {
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "candidate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["senderId", "candidate", "createdAt"]
+    },
+    "NearbyMessage": {
+      "title": "NearbyMessage",
+      "description": "Synced fallback message inside a nearby room when WebRTC data channel is unavailable.",
+      "type": "object",
+      "properties": {
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["webrtc", "nearby"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["senderId", "senderName", "text", "transport", "createdAt"]
+    },
+    "MessageReaction": {
+      "title": "MessageReaction",
+      "description": "User emoji reaction on a specific chat message.",
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "emoji": {
+          "type": "string",
+          "enum": ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["messageId", "uid", "emoji", "updatedAt"]
+    },
+    "TypingStatus": {
+      "title": "TypingStatus",
+      "description": "Ephemeral typing indicator per participant in a chat.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "isTyping": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "isTyping", "updatedAt"]
+    },
+    "MessageChunk": {
+      "title": "MessageChunk",
+      "description": "Ordered base64 chunk for larger file attachments (>550KB, up to 5MB) inside a chat message.",
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chunkIndex": {
+          "type": "integer"
+        },
+        "data": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 750000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["messageId", "senderId", "chunkIndex", "data", "createdAt"]
+    },
+    "UserStatus": {
+      "title": "UserStatus",
+      "description": "24-hour text or photo status/story shared by a user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "mediaType": {
+          "type": "string",
+          "enum": ["text", "image"]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "bgGradient": {
+          "type": "string",
+          "enum": ["blue", "emerald", "amber", "rose", "slate"]
+        },
+        "imageData": {
+          "type": "string",
+          "maxLength": 800000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "uid", "displayName", "photoUrl", "mediaType", "text", "bgGradient", "imageData", "createdAt", "expiresAt"]
+    },
+    "StatusReaction": {
+      "title": "StatusReaction",
+      "description": "User like or emoji reaction on a 24-hour status.",
+      "type": "object",
+      "properties": {
+        "statusId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "emoji": {
+          "type": "string",
+          "enum": ["❤️", "👍", "🔥", "😂", "😮", "😢"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["statusId", "uid", "displayName", "photoUrl", "emoji", "updatedAt"]
+    },
+    "StatusComment": {
+      "title": "StatusComment",
+      "description": "User comment posted on a 24-hour status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "statusId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "statusId", "uid", "displayName", "photoUrl", "text", "createdAt"]
+    },
+    "CallSession": {
+      "title": "CallSession",
+      "description": "Real-time 1-on-1 WebRTC voice or video call signaling session between two chat participants.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chatId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "callerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "callerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "callerPhoto": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "calleeUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "calleeName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "calleePhoto": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "participantIds": {
+          "type": "array"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["audio", "video"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ringing", "connected", "declined", "ended", "missed"]
+        },
+        "offerSdp": {
+          "type": "string",
+          "maxLength": 24000
+        },
+        "answerSdp": {
+          "type": "string",
+          "maxLength": 24000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id", "chatId", "callerUid", "callerName", "callerPhoto",
+        "calleeUid", "calleeName", "calleePhoto", "participantIds",
+        "mode", "status", "offerSdp", "answerSdp", "createdAt", "updatedAt"
+      ]
+    },
+    "CallCandidate": {
+      "title": "CallCandidate",
+      "description": "WebRTC ICE candidate trickle record for a call session.",
+      "type": "object",
+      "properties": {
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "candidate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["senderId", "candidate", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublicProfile" },
+      "description": "Public non-PII profile documents."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Owner-only PII document storing email and phone number."
+    },
+    "/email_directory/{emailHash}": {
+      "schema": { "$ref": "#/entities/DirectoryEntry" },
+      "description": "SHA-256 email hash to public UID lookup."
+    },
+    "/phone_directory/{phoneHash}": {
+      "schema": { "$ref": "#/entities/DirectoryEntry" },
+      "description": "SHA-256 E.164 phone hash to public UID lookup."
+    },
+    "/chats/{chatId}": {
+      "schema": { "$ref": "#/entities/ChatRoom" },
+      "description": "Persistent chat conversations."
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages inside a chat room."
+    },
+    "/chats/{chatId}/messages/{messageId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/MessageChunk" },
+      "description": "Ordered attachment chunks for files larger than inline threshold."
+    },
+    "/chats/{chatId}/reactions/{reactionId}": {
+      "schema": { "$ref": "#/entities/MessageReaction" },
+      "description": "Emoji reactions on chat messages."
+    },
+    "/chats/{chatId}/typing/{userId}": {
+      "schema": { "$ref": "#/entities/TypingStatus" },
+      "description": "Real-time typing status per chat participant."
+    },
+    "/chat_invites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/ChatInvite" },
+      "description": "Exact-code chat invite documents."
+    },
+    "/nearby_rooms/{roomCode}": {
+      "schema": { "$ref": "#/entities/NearbyRoom" },
+      "description": "WebRTC signaling and nearby direct pairing rooms."
+    },
+    "/nearby_rooms/{roomCode}/signals/{signalId}": {
+      "schema": { "$ref": "#/entities/NearbySignal" },
+      "description": "WebRTC ICE candidates for a nearby room."
+    },
+    "/nearby_rooms/{roomCode}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/NearbyMessage" },
+      "description": "Nearby room synced messages."
+    },
+    "/statuses/{statusId}": {
+      "schema": { "$ref": "#/entities/UserStatus" },
+      "description": "24-hour user statuses/stories."
+    },
+    "/statuses/{statusId}/reactions/{reactionId}": {
+      "schema": { "$ref": "#/entities/StatusReaction" },
+      "description": "Likes and emoji reactions on a 24-hour status."
+    },
+    "/statuses/{statusId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/StatusComment" },
+      "description": "Comments posted on a 24-hour status."
+    },
+    "/calls/{callId}": {
+      "schema": { "$ref": "#/entities/CallSession" },
+      "description": "1-on-1 WebRTC voice and video call signaling sessions."
+    },
+    "/calls/{callId}/candidates/{candidateId}": {
+      "schema": { "$ref": "#/entities/CallCandidate" },
+      "description": "ICE candidates exchanged during a call session."
+    }
+  }
+}

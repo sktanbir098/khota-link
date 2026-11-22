@@ -1,0 +1,6 @@
+{
+  "name": "KothaLink",
+  "description": "Easy real-time chat via Internet (Gmail & Mobile Number), Nearby Peer-to-Peer, and Web Bluetooth.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
