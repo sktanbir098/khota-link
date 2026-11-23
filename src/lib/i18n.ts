@@ -178,6 +178,12 @@ export const translations: Record<AppLanguage, Record<string, string>> = {
     testAlertBody: 'Sound & banner notifications are working properly!',
     soundAlertsLabel: 'Sound Alerts',
     pushAlertsLabel: 'Background Alerts',
+    voiceBtn: 'Voice',
+    recordingVoice: 'Recording',
+    sendVoice: 'Send Voice',
+    cancelVoice: 'Cancel',
+    micDenied: 'Microphone permission is needed to record a voice message.',
+    voiceUnsupported: 'Voice recording is not supported in this browser.',
   },
   bn: {
     appName: 'KothaLink',
@@ -356,6 +362,12 @@ export const translations: Record<AppLanguage, Record<string, string>> = {
     testAlertBody: 'সাউন্ড এবং ব্যানার নোটিফিকেশন সঠিকভাবে কাজ করছে!',
     soundAlertsLabel: 'মেসেজ সাউন্ড',
     pushAlertsLabel: 'ব্যাকগ্রাউন্ড অ্যালার্ট',
+    voiceBtn: 'ভয়েস',
+    recordingVoice: 'রেকর্ড হচ্ছে',
+    sendVoice: 'ভয়েস পাঠান',
+    cancelVoice: 'বাতিল',
+    micDenied: 'ভয়েস মেসেজ রেকর্ড করতে মাইক্রোফোনের অনুমতি দিন।',
+    voiceUnsupported: 'এই ব্রাউজারে ভয়েস রেকর্ডিং সাপোর্ট করে না।',
   },
 };
 

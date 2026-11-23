@@ -22,7 +22,7 @@ service cloud.firestore {
     function isVerifiedUser() {
       return isSignedIn() && (
         request.auth.token.email_verified == true
-        || ('phone_number' in request.auth.token && request.auth.token.phone_number is string && request.auth.token.phone_number.size() >= 6)
+        || ('firebase' in request.auth.token && 'sign_in_provider' in request.auth.token.firebase && request.auth.token.firebase.sign_in_provider == 'google.com')
       );
     }
 
@@ -35,7 +35,8 @@ service cloud.firestore {
     }
 
     function isEmailHashMatch(expectedHash) {
-      return isVerifiedUser()
+      return isSignedIn()
+        && request.auth.token.email_verified == true
         && 'email' in request.auth.token
         && request.auth.token.email is string
         && expectedHash is string
@@ -795,18 +796,11 @@ service cloud.firestore {
         || isEmailHashMatch(existing().recipientHash)
         || isPhoneHashMatch(existing().recipientHash)
       );
-      allow list: if isVerifiedUser() && (
-        (
-          'email' in request.auth.token
-          && request.auth.token.email is string
-          && resource.data.recipientHash == hashing.sha256(request.auth.token.email.lower().toUtf8()).toHexString().lower()
-        )
-        || (
-          'phone_number' in request.auth.token
-          && request.auth.token.phone_number is string
-          && resource.data.recipientHash == hashing.sha256(request.auth.token.phone_number.toUtf8()).toHexString().lower()
-        )
-      );
+      allow list: if isSignedIn()
+        && request.auth.token.email_verified == true
+        && 'email' in request.auth.token
+        && request.auth.token.email is string
+        && resource.data.recipientHash == hashing.sha256(request.auth.token.email.lower().toUtf8()).toHexString().lower();
       allow create: if isVerifiedUser()
         && isValidId(deliveryId)
         && isValidPendingDelivery(incoming(), deliveryId)

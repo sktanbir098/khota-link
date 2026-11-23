@@ -14,6 +14,7 @@ import {
   KeyRound,
   Mail,
   MessageSquarePlus,
+  Mic,
   Moon,
   Paperclip,
   Phone,
@@ -23,7 +24,9 @@ import {
   Settings,
   Share2,
   Smile,
+  Square,
   Sun,
+  Trash2,
   Upload,
   UserCheck,
   UserPlus,
@@ -66,6 +69,7 @@ import {
   updateUserPresence,
 } from './lib/chatService';
 import { auth, googleProvider } from './lib/firebase';
+import { useFloatingBadgeClearance } from './lib/floatingBadge';
 import { t } from './lib/i18n';
 import { buildInviteShareUrl, getPublicAppOrigin } from './lib/shareLink';
 import {
@@ -160,6 +164,7 @@ export default function App() {
   const [privateInfo, setPrivateInfo] = useState<UserPrivateInfo | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const hasNetlifyBadge = useFloatingBadgeClearance();
 
   // Chats, presence, messages, reactions, typing & attachments
   const [chats, setChats] = useState<ChatRoom[]>([]);
@@ -189,6 +194,9 @@ export default function App() {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
   const [chatError, setChatError] = useState('');
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [voiceRecordSeconds, setVoiceRecordSeconds] = useState(0);
+  const [voiceBusy, setVoiceBusy] = useState(false);
 
   // Statuses & Notification state
   const [statuses, setStatuses] = useState<UserStatus[]>([]);
@@ -253,6 +261,12 @@ export default function App() {
   const prevChatTimeRef = useRef<Map<string, number>>(new Map());
   const loadedChatMessagesRef = useRef<Set<string>>(new Set());
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceTimerRef = useRef<number | null>(null);
+  const voiceStartMsRef = useRef<number>(0);
+  const voiceIntentRef = useRef<'send' | 'cancel'>('cancel');
 
   useEffect(() => {
     initAudioUnlock();
@@ -796,8 +810,23 @@ export default function App() {
       await signInWithPopup(auth, googleProvider);
       setGuestBluetoothOpen(false);
     } catch (err) {
+      const code = (err as { code?: string })?.code || '';
       const msg = err instanceof Error ? err.message : 'Sign-in failed.';
-      if (!msg.includes('popup-closed-by-user')) {
+      if (code === 'auth/popup-closed-by-user' || msg.includes('popup-closed-by-user')) {
+        return;
+      }
+      if (code === 'auth/unauthorized-domain' || msg.includes('unauthorized-domain')) {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setAuthError(
+          `UNAUTHORIZED_DOMAIN::${host}`
+        );
+      } else if (code === 'auth/popup-blocked' || msg.includes('popup-blocked')) {
+        setAuthError(
+          lang === 'bn'
+            ? 'ব্রাউজার লগইন পপআপ ব্লক করেছে। অনুগ্রহ করে এই সাইটের জন্য pop-up চালু করে আবার চেষ্টা করুন।'
+            : 'Browser blocked the Google sign-in popup. Please allow pop-ups for this site and try again.'
+        );
+      } else {
         setAuthError(msg);
       }
     } finally {
@@ -890,12 +919,64 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = async (e?: React.FormEvent, overrideText?: string) => {
+  const cleanupVoiceStream = useCallback(() => {
+    if (voiceTimerRef.current !== null) {
+      window.clearInterval(voiceTimerRef.current);
+      voiceTimerRef.current = null;
+    }
+    if (voiceStreamRef.current) {
+      voiceStreamRef.current.getTracks().forEach((tr) => tr.stop());
+      voiceStreamRef.current = null;
+    }
+    mediaRecorderRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      voiceIntentRef.current = 'cancel';
+      try {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      } catch {
+        // Ignore stop errors on unmount
+      }
+      cleanupVoiceStream();
+    };
+  }, [cleanupVoiceStream]);
+
+  useEffect(() => {
+    if (isRecordingVoice) {
+      voiceIntentRef.current = 'cancel';
+      try {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      } catch {
+        // Ignore
+      }
+      cleanupVoiceStream();
+      setIsRecordingVoice(false);
+      setVoiceRecordSeconds(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChatId]);
+
+  const handleSendMessage = async (
+    e?: React.FormEvent,
+    overrideText?: string,
+    overrideAttachment?: PreparedAttachment | null
+  ) => {
     e?.preventDefault();
     unlockAudioNow();
     if (!activeChat || !publicProfile || preparingAttachment) return;
     const textToSend = (overrideText ?? messageInput).trim();
-    const attachmentToSend = overrideText ? null : pendingAttachment;
+    const attachmentToSend =
+      overrideAttachment !== undefined
+        ? overrideAttachment
+        : overrideText
+        ? null
+        : pendingAttachment;
     if (!textToSend && !attachmentToSend) return;
 
     const targetChat = activeChat;
@@ -906,7 +987,7 @@ export default function App() {
 
     clearOwnTyping(targetChat.id);
     setChatError('');
-    if (!overrideText) {
+    if (!overrideText && overrideAttachment === undefined) {
       setMessageInput('');
       setPendingAttachment(null);
     }
@@ -972,14 +1053,131 @@ export default function App() {
         [targetChat.id]: (prev[targetChat.id] || []).filter((m) => m.id !== clientMsgId),
       }));
       setChatError(formatFriendlyError(err));
-      if (!overrideText && textToSend) {
+      if (!overrideText && overrideAttachment === undefined && textToSend) {
         setMessageInput((curr) => (curr ? curr : textToSend));
       }
-      if (attachmentToSend) {
+      if (attachmentToSend && overrideAttachment === undefined) {
         setPendingAttachment((curr) => curr ?? attachmentToSend);
       }
     } finally {
       setUploadProgress(null);
+    }
+  };
+
+  const stopVoiceRecording = (intent: 'send' | 'cancel') => {
+    voiceIntentRef.current = intent;
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state !== 'inactive') {
+      try {
+        rec.stop();
+      } catch {
+        cleanupVoiceStream();
+        setIsRecordingVoice(false);
+        setVoiceRecordSeconds(0);
+      }
+    } else {
+      cleanupVoiceStream();
+      setIsRecordingVoice(false);
+      setVoiceRecordSeconds(0);
+    }
+  };
+
+  const startVoiceRecording = async () => {
+    unlockAudioNow();
+    setChatError('');
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      setChatError(t(lang, 'voiceUnsupported'));
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      voiceStreamRef.current = stream;
+      voiceChunksRef.current = [];
+      voiceIntentRef.current = 'send';
+
+      const mimeCandidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+      ];
+      const chosenMime =
+        typeof MediaRecorder.isTypeSupported === 'function'
+          ? mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || ''
+          : '';
+
+      const recorder = new MediaRecorder(
+        stream,
+        chosenMime ? { mimeType: chosenMime, audioBitsPerSecond: 32000 } : { audioBitsPerSecond: 32000 }
+      );
+      mediaRecorderRef.current = recorder;
+      voiceStartMsRef.current = Date.now();
+      setVoiceRecordSeconds(0);
+      setIsRecordingVoice(true);
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) {
+          voiceChunksRef.current.push(ev.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const intent = voiceIntentRef.current;
+        const elapsedSec = Math.max(1, Math.round((Date.now() - voiceStartMsRef.current) / 1000));
+        const rawMime = recorder.mimeType || chosenMime || 'audio/webm';
+        const cleanMime = rawMime.split(';')[0] || 'audio/webm';
+        const chunks = voiceChunksRef.current.slice();
+        voiceChunksRef.current = [];
+        cleanupVoiceStream();
+        setIsRecordingVoice(false);
+        setVoiceRecordSeconds(0);
+
+        if (intent !== 'send' || chunks.length === 0) return;
+
+        const ext = cleanMime.includes('mp4')
+          ? 'm4a'
+          : cleanMime.includes('ogg')
+          ? 'ogg'
+          : 'webm';
+        const mins = Math.floor(elapsedSec / 60);
+        const secs = (elapsedSec % 60).toString().padStart(2, '0');
+        const label = `Voice message (${mins}:${secs}).${ext}`;
+
+        setVoiceBusy(true);
+        try {
+          const blob = new Blob(chunks, { type: cleanMime });
+          const voiceFile = new File([blob], label, { type: cleanMime });
+          const prepared = await prepareAttachment(voiceFile);
+          await handleSendMessage(undefined, '', prepared);
+        } catch (err) {
+          setChatError(err instanceof Error ? err.message : 'Unable to send voice message.');
+        } finally {
+          setVoiceBusy(false);
+        }
+      };
+
+      recorder.start(250);
+      if (voiceTimerRef.current !== null) {
+        window.clearInterval(voiceTimerRef.current);
+      }
+      voiceTimerRef.current = window.setInterval(() => {
+        const sec = Math.floor((Date.now() - voiceStartMsRef.current) / 1000);
+        setVoiceRecordSeconds(sec);
+        if (sec >= 180) {
+          stopVoiceRecording('send');
+        }
+      }, 250);
+    } catch {
+      cleanupVoiceStream();
+      setIsRecordingVoice(false);
+      setChatError(t(lang, 'micDenied'));
     }
   };
 
@@ -1165,8 +1363,34 @@ export default function App() {
 
               <div className="space-y-4">
                 {authError && (
-                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-xs text-red-700 dark:text-red-300 leading-relaxed">
-                    {authError}
+                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-xs text-red-700 dark:text-red-300 leading-relaxed space-y-2">
+                    {authError.startsWith('UNAUTHORIZED_DOMAIN::') ? (
+                      <>
+                        <p>
+                          {lang === 'bn'
+                            ? 'এই ডোমেইনটি এখনো Firebase Authorized Domains-এ যুক্ত নেই। Firebase Console -> Authentication -> Settings -> Authorized domains-এ নিচের ডোমেইনটি যোগ করুন:'
+                            : 'This domain is not yet allowlisted in Firebase Auth. Add this hostname under Firebase Console -> Authentication -> Settings -> Authorized domains:'}
+                        </p>
+                        <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-white/80 dark:bg-slate-900 border border-red-200 dark:border-red-900">
+                          <code className="font-mono-tabular text-[11px] text-slate-900 dark:text-slate-100 truncate">
+                            {authError.replace('UNAUTHORIZED_DOMAIN::', '')}
+                          </code>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const host = authError.replace('UNAUTHORIZED_DOMAIN::', '');
+                              if (host) void navigator.clipboard?.writeText(host);
+                            }}
+                            className="px-2.5 py-1 rounded-md bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold shrink-0 flex items-center gap-1"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>Copy</span>
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      authError
+                    )}
                   </div>
                 )}
 
@@ -1564,6 +1788,84 @@ export default function App() {
           </div>
         </div>
 
+        {/* Cool Top Quick-Access Strip for BT / QR & Gemini AI */}
+        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-900 grid grid-cols-2 gap-2 shrink-0 bg-slate-50/70 dark:bg-slate-900/35">
+          <button
+            type="button"
+            onClick={() => {
+              unlockAudioNow();
+              setActiveChatId(null);
+              setBtInitialMode('bluetooth');
+              setWorkspaceView('bluetooth');
+            }}
+            className={`group flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left transition-all active:scale-[0.98] ${
+              workspaceView === 'bluetooth'
+                ? 'bg-blue-600 border-blue-600 text-white shadow-sm shadow-blue-600/20'
+                : 'bg-gradient-to-br from-blue-50/95 to-indigo-50/85 dark:from-blue-950/45 dark:to-indigo-950/35 border-blue-200/80 dark:border-blue-800/60 text-slate-900 dark:text-white hover:border-blue-400'
+            }`}
+          >
+            <span
+              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 ${
+                workspaceView === 'bluetooth'
+                  ? 'bg-white/20 text-white'
+                  : 'bg-blue-600 text-white shadow-xs'
+              }`}
+            >
+              <Bluetooth className="w-4 h-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-xs font-bold leading-tight truncate">BT / QR</span>
+              <span
+                className={`block text-[10px] leading-tight truncate mt-0.5 ${
+                  workspaceView === 'bluetooth'
+                    ? 'text-blue-100'
+                    : 'text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                {lang === 'bn' ? 'অফলাইন ও স্ক্যান' : 'Nearby & Scan'}
+              </span>
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              unlockAudioNow();
+              setActiveChatId(null);
+              setWorkspaceView('gemini');
+            }}
+            className={`group flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left transition-all active:scale-[0.98] ${
+              workspaceView === 'gemini'
+                ? 'bg-gradient-to-r from-indigo-600 to-violet-600 border-indigo-600 text-white shadow-sm shadow-indigo-600/20'
+                : 'bg-gradient-to-br from-violet-50/95 to-sky-50/85 dark:from-violet-950/45 dark:to-sky-950/35 border-violet-200/80 dark:border-violet-800/60 text-slate-900 dark:text-white hover:border-violet-400'
+            }`}
+          >
+            <span
+              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 ${
+                workspaceView === 'gemini'
+                  ? 'bg-white/20'
+                  : 'bg-white dark:bg-slate-900 border border-violet-100 dark:border-violet-800/50 shadow-xs'
+              }`}
+            >
+              <GeminiLogo variant="icon" size={18} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-xs font-bold leading-tight truncate">
+                {t(lang, 'geminiAssistantTitle')}
+              </span>
+              <span
+                className={`block text-[10px] leading-tight truncate mt-0.5 ${
+                  workspaceView === 'gemini'
+                    ? 'text-indigo-100'
+                    : 'text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                {lang === 'bn' ? 'স্মার্ট সহায়ক' : 'Smart Chat'}
+              </span>
+            </span>
+          </button>
+        </div>
+
         {/* 24h Status / Stories Strip */}
         {(() => {
           const myStatuses = statuses.filter((s) => s.uid === publicProfile.uid);
@@ -1696,7 +1998,11 @@ export default function App() {
         })()}
 
         {/* Chat List with Blinking Green Online Ring + Red Offline Dot + Blinking Yellow Unread Dot */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-1">
+        <div
+          className={`flex-1 px-3 pt-3 space-y-1 chat-list-scroll${
+            hasNetlifyBadge ? ' has-netlify-badge' : ''
+          }`}
+        >
           {filteredChats.length === 0 ? (
             <div className="py-10 px-4 text-center space-y-3">
               <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
@@ -1831,66 +2137,35 @@ export default function App() {
           </button>
         </div>
 
-        {/* Unified Bottom Action Dock (Single Location on Both Mobile & Desktop) */}
-        <nav className="shrink-0 h-16 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 grid grid-cols-4 items-center">
-          <button
-            type="button"
-            onClick={() => setWorkspaceView('hub')}
-            className={`h-full flex flex-col items-center justify-center gap-0.5 transition-colors ${
-              workspaceView === 'hub'
-                ? 'text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            <MessageSquarePlus className="w-5 h-5" />
-            <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'backToChats')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              unlockAudioNow();
-              setConnectModalTab('gmail');
-              setConnectModalOpen(true);
-            }}
-            className="h-full flex flex-col items-center justify-center gap-0.5 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
-          >
-            <UserPlus className="w-5 h-5" />
-            <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'newChat')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              unlockAudioNow();
-              setActiveChatId(null);
-              setBtInitialMode('bluetooth');
-              setWorkspaceView('bluetooth');
-            }}
-            className={`h-full flex flex-col items-center justify-center gap-0.5 transition-colors ${
-              workspaceView === 'bluetooth'
-                ? 'text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            <Bluetooth className="w-5 h-5" />
-            <span className="text-[10px] font-medium whitespace-nowrap">BT / QR</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              unlockAudioNow();
-              setActiveChatId(null);
-              setWorkspaceView('gemini');
-            }}
-            className={`h-full flex flex-col items-center justify-center gap-0.5 transition-colors ${
-              workspaceView === 'gemini'
-                ? 'text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            <GeminiLogo variant="icon" size={20} />
-            <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'geminiAssistantTitle')}</span>
-          </button>
-        </nav>
+        {/* Bottom Action Dock: Keep Chats & New Chat on Left Side (Right stays clear of Netlify badge) */}
+        <div className="shrink-0 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800">
+          <nav className="h-16 w-[52%] md:w-full grid grid-cols-2 items-center">
+            <button
+              type="button"
+              onClick={() => setWorkspaceView('hub')}
+              className={`h-full flex flex-col items-center justify-center gap-0.5 transition-colors ${
+                workspaceView === 'hub'
+                  ? 'text-blue-600 dark:text-blue-400'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <MessageSquarePlus className="w-5 h-5" />
+              <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'backToChats')}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                unlockAudioNow();
+                setConnectModalTab('gmail');
+                setConnectModalOpen(true);
+              }}
+              className="h-full flex flex-col items-center justify-center gap-0.5 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+            >
+              <UserPlus className="w-5 h-5" />
+              <span className="text-[10px] font-medium whitespace-nowrap">{t(lang, 'newChat')}</span>
+            </button>
+          </nav>
+        </div>
       </aside>
 
       {/* MAIN VIEWPORT */}
@@ -2213,6 +2488,7 @@ export default function App() {
                     replyToText={msg.replyToText}
                     attachmentType={msg.attachmentType}
                     attachmentName={msg.attachmentName}
+                    attachmentMime={msg.attachmentMime}
                     attachmentSize={msg.attachmentSize}
                     attachmentData={msg.attachmentData}
                     optimistic={msg.optimistic}
@@ -2436,23 +2712,159 @@ export default function App() {
               }}
             />
 
-            {/* Organized Composer Dock with Typing & Send Flight Animations */}
-            <form
-              onSubmit={(e) => handleSendMessage(e)}
-              className="p-2.5 sm:p-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shrink-0"
+            {/* Organized 2-Row Composer Dock: Send Shifted Leftward + Voice Message Recorder */}
+            <div
+              className={`border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shrink-0 chat-composer-container${
+                hasNetlifyBadge ? ' has-netlify-badge' : ''
+              }`}
             >
-              <div className="flex items-center gap-1.5 sm:gap-2 p-1.5 rounded-2xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 focus-within:border-blue-500 dark:focus-within:border-blue-500 transition-colors">
-                <div className="flex items-center gap-1 shrink-0">
+              <form
+                onSubmit={(e) => handleSendMessage(e)}
+                className="p-2.5 sm:p-4 space-y-2"
+              >
+                {/* Row 1: Input / Live Voice Recording + Send Button (shifted left away from bottom-right badge) */}
+                {isRecordingVoice ? (
+                  <div
+                    className={`flex items-center gap-2 p-2 rounded-2xl bg-red-50 dark:bg-red-950/35 border border-red-200 dark:border-red-900/70 ${
+                      hasNetlifyBadge ? 'mr-[128px] sm:mr-[180px]' : 'mr-2 sm:mr-4'
+                    }`}
+                  >
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0 ml-1" />
+                    <span className="text-xs font-semibold text-red-700 dark:text-red-300 truncate">
+                      {t(lang, 'recordingVoice')}
+                    </span>
+                    <span className="text-xs font-mono-tabular font-bold text-red-600 dark:text-red-400 shrink-0">
+                      {Math.floor(voiceRecordSeconds / 60)}:
+                      {(voiceRecordSeconds % 60).toString().padStart(2, '0')}
+                    </span>
+                    <div className="flex-1 min-w-0" />
+                    <button
+                      type="button"
+                      onClick={() => stopVoiceRecording('cancel')}
+                      aria-label={t(lang, 'cancelVoice')}
+                      title={t(lang, 'cancelVoice')}
+                      className="min-h-[36px] min-w-[36px] px-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-red-600 flex items-center justify-center shrink-0"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => stopVoiceRecording('send')}
+                      disabled={voiceBusy}
+                      aria-label={t(lang, 'sendVoice')}
+                      className="min-h-[36px] px-3 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    >
+                      <Square className="w-3 h-3 fill-current" />
+                      <span>{t(lang, 'sendVoice')}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    className={`flex items-center gap-1.5 sm:gap-2 p-1.5 rounded-2xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 focus-within:border-blue-500 dark:focus-within:border-blue-500 transition-colors ${
+                      hasNetlifyBadge ? 'mr-[128px] sm:mr-[180px]' : 'mr-2 sm:mr-6'
+                    }`}
+                  >
+                    <div className="relative flex-1 min-w-0 flex items-center">
+                      <textarea
+                        rows={1}
+                        maxLength={2000}
+                        value={messageInput}
+                        onChange={(e) => handleComposerChange(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            if (enterToSend && !e.shiftKey) {
+                              e.preventDefault();
+                              void handleSendMessage();
+                            } else if (!enterToSend && (e.ctrlKey || e.metaKey)) {
+                              e.preventDefault();
+                              void handleSendMessage();
+                            }
+                          }
+                        }}
+                        onBlur={() => clearOwnTyping(activeChat.id)}
+                        onPaste={(e) => {
+                          const items = e.clipboardData?.items;
+                          if (!items) return;
+                          for (let i = 0; i < items.length; i++) {
+                            const item = items[i];
+                            if (item.type.startsWith('image/')) {
+                              const blob = item.getAsFile();
+                              if (blob) {
+                                e.preventDefault();
+                                void handleAttachmentPicked(blob);
+                                break;
+                              }
+                            }
+                          }
+                        }}
+                        placeholder={t(lang, 'typeMessage')}
+                        className="w-full min-h-[40px] max-h-28 py-2.5 px-2.5 pr-9 bg-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none leading-snug"
+                      />
+                      {/* Live Typing Wave Feedback while User Types */}
+                      <AnimatePresence>
+                        {messageInput.trim().length > 0 && (
+                          <motion.span
+                            initial={{ opacity: 0, scale: 0.7 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.7 }}
+                            transition={{ duration: 0.14 }}
+                            aria-hidden="true"
+                            className="absolute right-2 flex items-center gap-0.5 pointer-events-none"
+                          >
+                            {[0, 1, 2].map((bar) => (
+                              <motion.span
+                                key={bar}
+                                animate={{ scaleY: [0.5, 1.35, 0.5] }}
+                                transition={{
+                                  duration: 0.65,
+                                  repeat: Infinity,
+                                  delay: bar * 0.12,
+                                }}
+                                className="w-0.5 h-3 rounded-full bg-blue-500/80 dark:bg-blue-400/80"
+                              />
+                            ))}
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    <motion.button
+                      type="submit"
+                      whileHover={{ scale: 1.03 }}
+                      whileTap={{ scale: 0.91 }}
+                      disabled={
+                        (!messageInput.trim() && !pendingAttachment) ||
+                        preparingAttachment ||
+                        voiceBusy
+                      }
+                      className="min-h-[40px] px-3.5 sm:px-4 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors overflow-hidden"
+                    >
+                      <motion.span
+                        key={sendPulseKey}
+                        initial={sendPulseKey > 0 ? { x: -10, y: 10, scale: 0.65, rotate: -15 } : false}
+                        animate={{ x: 0, y: 0, scale: 1, rotate: 0 }}
+                        transition={{ type: 'spring', stiffness: 380, damping: 18 }}
+                        className="inline-flex items-center"
+                      >
+                        <Send className="w-4 h-4" />
+                      </motion.span>
+                      <span className="hidden sm:inline">{t(lang, 'send')}</span>
+                    </motion.button>
+                  </div>
+                )}
+
+                {/* Row 2: Compact Left-Aligned Media, Emoji & Voice Mic Controls */}
+                <div className="flex items-center gap-1 justify-start">
                   <motion.button
                     type="button"
                     whileTap={{ scale: 0.92 }}
                     onClick={() => imageInputRef.current?.click()}
                     title={t(lang, 'uploadImage')}
                     aria-label={t(lang, 'uploadImage')}
-                    className="min-h-[40px] px-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
                   >
                     <ImagePlus className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-                    <span className="hidden sm:inline">{t(lang, 'photoBtn')}</span>
+                    <span>{t(lang, 'photoBtn')}</span>
                   </motion.button>
                   <motion.button
                     type="button"
@@ -2460,110 +2872,39 @@ export default function App() {
                     onClick={() => fileInputRef.current?.click()}
                     title={t(lang, 'uploadFile')}
                     aria-label={t(lang, 'uploadFile')}
-                    className="min-h-[40px] px-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
                   >
                     <Paperclip className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                    <span className="hidden sm:inline">{t(lang, 'fileBtn')}</span>
+                    <span>{t(lang, 'fileBtn')}</span>
                   </motion.button>
                   <motion.button
                     type="button"
                     whileTap={{ scale: 0.92 }}
                     onClick={() => setShowEmojiPicker((v) => !v)}
                     aria-label="Toggle emojis"
-                    className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl transition-colors ${
+                    className={`min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl transition-colors ${
                       showEmojiPicker
-                        ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400'
-                        : 'text-slate-500 hover:bg-white dark:hover:bg-slate-800'
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
+                        : 'bg-slate-100 dark:bg-slate-900 text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800'
                     }`}
                   >
                     <Smile className="w-4 h-4" />
                   </motion.button>
-                </div>
-
-                <div className="relative flex-1 min-w-0 flex items-center">
-                  <textarea
-                    rows={1}
-                    maxLength={2000}
-                    value={messageInput}
-                    onChange={(e) => handleComposerChange(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        if (enterToSend && !e.shiftKey) {
-                          e.preventDefault();
-                          void handleSendMessage();
-                        } else if (!enterToSend && (e.ctrlKey || e.metaKey)) {
-                          e.preventDefault();
-                          void handleSendMessage();
-                        }
-                      }
-                    }}
-                    onBlur={() => clearOwnTyping(activeChat.id)}
-                    onPaste={(e) => {
-                      const items = e.clipboardData?.items;
-                      if (!items) return;
-                      for (let i = 0; i < items.length; i++) {
-                        const item = items[i];
-                        if (item.type.startsWith('image/')) {
-                          const blob = item.getAsFile();
-                          if (blob) {
-                            e.preventDefault();
-                            void handleAttachmentPicked(blob);
-                            break;
-                          }
-                        }
-                      }
-                    }}
-                    placeholder={t(lang, 'typeMessage')}
-                    className="w-full min-h-[40px] max-h-28 py-2.5 px-2.5 pr-9 bg-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none leading-snug"
-                  />
-                  {/* Live Typing Wave Feedback while User Types */}
-                  <AnimatePresence>
-                    {messageInput.trim().length > 0 && (
-                      <motion.span
-                        initial={{ opacity: 0, scale: 0.7 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.7 }}
-                        transition={{ duration: 0.14 }}
-                        aria-hidden="true"
-                        className="absolute right-2 flex items-center gap-0.5 pointer-events-none"
-                      >
-                        {[0, 1, 2].map((bar) => (
-                          <motion.span
-                            key={bar}
-                            animate={{ scaleY: [0.5, 1.35, 0.5] }}
-                            transition={{
-                              duration: 0.65,
-                              repeat: Infinity,
-                              delay: bar * 0.12,
-                            }}
-                            className="w-0.5 h-3 rounded-full bg-blue-500/80 dark:bg-blue-400/80"
-                          />
-                        ))}
-                      </motion.span>
-                    )}
-                  </AnimatePresence>
-                </div>
-
-                <motion.button
-                  type="submit"
-                  whileHover={{ scale: 1.03 }}
-                  whileTap={{ scale: 0.91 }}
-                  disabled={(!messageInput.trim() && !pendingAttachment) || preparingAttachment}
-                  className="min-h-[40px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors overflow-hidden"
-                >
-                  <motion.span
-                    key={sendPulseKey}
-                    initial={sendPulseKey > 0 ? { x: -10, y: 10, scale: 0.65, rotate: -15 } : false}
-                    animate={{ x: 0, y: 0, scale: 1, rotate: 0 }}
-                    transition={{ type: 'spring', stiffness: 380, damping: 18 }}
-                    className="inline-flex items-center"
+                  <motion.button
+                    type="button"
+                    whileTap={{ scale: 0.92 }}
+                    disabled={isRecordingVoice || voiceBusy}
+                    onClick={() => void startVoiceRecording()}
+                    title={t(lang, 'voiceBtn')}
+                    aria-label={t(lang, 'voiceBtn')}
+                    className="min-h-[36px] px-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200/80 dark:border-rose-900/60 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/50 disabled:opacity-40 flex items-center gap-1.5 text-xs font-semibold transition-colors whitespace-nowrap"
                   >
-                    <Send className="w-4 h-4" />
-                  </motion.span>
-                  <span className="hidden sm:inline">{t(lang, 'send')}</span>
-                </motion.button>
-              </div>
-            </form>
+                    <Mic className="w-4 h-4 shrink-0" />
+                    <span>{t(lang, 'voiceBtn')}</span>
+                  </motion.button>
+                </div>
+              </form>
+            </div>
           </motion.div>
         ) : (
           /* Desktop Quick Connect Hub */

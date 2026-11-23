@@ -1,6 +1,14 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
 
+:root {
+  --netlify-badge-offset: 0px;
+}
+
+html[data-netlify-badge="true"] {
+  --netlify-badge-offset: 80px;
+}
+
 @layer base {
   html, body {
     overflow-x: hidden;
@@ -13,13 +21,55 @@
   }
 
   h1, h2, h3, .font-display {
-    font-family: 'Bricolage Grotesque', 'Plus Jakarta Sans', 'Noto Sans Bengali', system-ui, sans-serif;
+    font-family: 'Bricolage Grotesque', 'Plus Jakarta Sans', 'Noto Sans Bengali', system-ui, -apple-system, sans-serif;
   }
 
   .font-mono-tabular {
     font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
     font-variant-numeric: tabular-nums;
   }
+}
+
+/* Scrollable chat composer container: keeps content scrollable and Send button shifted clear of bottom-right badges */
+.chat-composer-container {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  max-height: 45dvh;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (min-width: 640px) {
+  .chat-composer-container {
+    padding-right: 220px;
+  }
+}
+
+@media (max-width: 639px) {
+  .chat-composer-container.has-netlify-badge {
+    padding-bottom: calc(max(var(--netlify-badge-offset, 76px), 76px) + env(safe-area-inset-bottom, 0px));
+    scroll-padding-bottom: calc(max(var(--netlify-badge-offset, 76px), 76px) + 12px);
+  }
+}
+
+/* Chat list scrollable region with dynamic extra bottom padding for floating badge */
+.chat-list-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(0.75rem + var(--netlify-badge-offset, 0px) + env(safe-area-inset-bottom, 0px));
+  scroll-padding-bottom: calc(0.75rem + var(--netlify-badge-offset, 0px));
+}
+
+.chat-list-scroll.has-netlify-badge {
+  padding-bottom: calc(0.75rem + max(var(--netlify-badge-offset, 80px), 80px) + env(safe-area-inset-bottom, 0px));
+  scroll-padding-bottom: calc(0.75rem + max(var(--netlify-badge-offset, 80px), 80px));
+}
+
+/* Safe-area bottom padding for left-aligned 2-tab bottom action dock */
+.chat-dock-container {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* Subtle custom scrollbars for chat panes */

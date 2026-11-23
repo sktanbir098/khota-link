@@ -1,6 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, Clock, Copy, Download, FileText, Loader2, Reply, Smile } from 'lucide-react';
+import {
+  Check,
+  Clock,
+  Copy,
+  Download,
+  FileText,
+  Loader2,
+  Mic,
+  Pause,
+  Play,
+  Reply,
+  Smile,
+} from 'lucide-react';
 import { formatFileSize, triggerFileDownload } from '../lib/attachments';
 import { AttachmentType, REACTION_EMOJIS, ReactionEmoji } from '../types/chat';
 
@@ -19,6 +31,7 @@ interface Props {
   replyToText?: string;
   attachmentType?: AttachmentType;
   attachmentName?: string;
+  attachmentMime?: string;
   attachmentSize?: number;
   attachmentData?: string;
   optimistic?: boolean;
@@ -32,6 +45,14 @@ interface Props {
   onResolveAttachment?: (messageId: string, marker: string) => Promise<string>;
 }
 
+function formatAudioSeconds(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '0:00';
+  const total = Math.floor(sec);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
 export const MessageBubble: React.FC<Props> = ({
   id,
   text,
@@ -41,6 +62,7 @@ export const MessageBubble: React.FC<Props> = ({
   replyToText,
   attachmentType = 'none',
   attachmentName = '',
+  attachmentMime = '',
   attachmentSize = 0,
   attachmentData = '',
   optimistic = false,
@@ -61,8 +83,26 @@ export const MessageBubble: React.FC<Props> = ({
   const [downloadingFile, setDownloadingFile] = useState(false);
   const [loadingChunkedImage, setLoadingChunkedImage] = useState(false);
 
+  // Voice message audio player state
+  const [loadingAudio, setLoadingAudio] = useState(false);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+
   const longPressTimerRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const hasImage = attachmentType === 'image' && Boolean(attachmentData);
+  const hasFile = attachmentType === 'file' && Boolean(attachmentData);
+  const isAudioAttachment =
+    hasFile &&
+    (attachmentMime.startsWith('audio/') ||
+      /\.(webm|ogg|mp3|wav|m4a|aac)$/i.test(attachmentName || '') ||
+      /^voice\s*message/i.test(attachmentName || ''));
+
+  const labelDurationMatch = attachmentName.match(/\((\d+:\d{2})\)/);
+  const fallbackDurationLabel = labelDurationMatch ? labelDurationMatch[1] : '';
 
   useEffect(() => {
     if (!attachmentData) {
@@ -73,15 +113,15 @@ export const MessageBubble: React.FC<Props> = ({
       setResolvedUrl(attachmentData);
       return;
     }
-    if (attachmentType === 'image' && onResolveAttachment && !resolvedUrl) {
+    if ((attachmentType === 'image' || isAudioAttachment) && onResolveAttachment && !resolvedUrl) {
       let cancelled = false;
-      setLoadingChunkedImage(true);
+      if (attachmentType === 'image') setLoadingChunkedImage(true);
       onResolveAttachment(id, attachmentData)
         .then((url) => {
           if (!cancelled && url) setResolvedUrl(url);
         })
         .catch(() => {
-          // Leave fallback clickable download button if chunk fails
+          // Fallback to manual download/play trigger if preload fails
         })
         .finally(() => {
           if (!cancelled) setLoadingChunkedImage(false);
@@ -90,7 +130,7 @@ export const MessageBubble: React.FC<Props> = ({
         cancelled = true;
       };
     }
-  }, [id, attachmentData, attachmentType, onResolveAttachment, resolvedUrl]);
+  }, [id, attachmentData, attachmentType, isAudioAttachment, onResolveAttachment, resolvedUrl]);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -143,11 +183,45 @@ export const MessageBubble: React.FC<Props> = ({
     }
   };
 
-  const hasImage = attachmentType === 'image' && Boolean(attachmentData);
-  const hasFile = attachmentType === 'file' && Boolean(attachmentData);
+  const handleToggleAudio = async () => {
+    let url = resolvedUrl;
+    if (!url && attachmentData && onResolveAttachment) {
+      setLoadingAudio(true);
+      try {
+        url = await onResolveAttachment(id, attachmentData);
+        if (url) setResolvedUrl(url);
+      } finally {
+        setLoadingAudio(false);
+      }
+    }
+    if (!url) return;
+
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (audio.src !== url) {
+      audio.src = url;
+    }
+
+    if (isPlayingAudio) {
+      audio.pause();
+      setIsPlayingAudio(false);
+    } else {
+      try {
+        await audio.play();
+        setIsPlayingAudio(true);
+      } catch {
+        setIsPlayingAudio(false);
+      }
+    }
+  };
 
   const animateArrival = justArrived && !isMe;
   const animateSend = justSent && isMe;
+
+  const effectiveDuration = Number.isFinite(audioDuration) && audioDuration > 0 ? audioDuration : 0;
+  const progressPercent =
+    effectiveDuration > 0 ? Math.min(100, (audioCurrentTime / effectiveDuration) * 100) : 0;
 
   return (
     <motion.div
@@ -317,7 +391,104 @@ export const MessageBubble: React.FC<Props> = ({
             )
           )}
 
-          {hasFile && (
+          {hasFile && isAudioAttachment && (
+            <div
+              className={`min-w-[220px] sm:min-w-[260px] flex items-center gap-2.5 p-2 rounded-xl border ${
+                text ? 'mb-2' : ''
+              } ${
+                isMe
+                  ? 'bg-blue-700/60 border-blue-400/40 text-white'
+                  : 'bg-slate-50 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
+              }`}
+            >
+              <audio
+                ref={audioRef}
+                preload="metadata"
+                src={resolvedUrl || undefined}
+                onLoadedMetadata={(e) => {
+                  const d = e.currentTarget.duration;
+                  if (Number.isFinite(d) && d > 0) setAudioDuration(d);
+                }}
+                onTimeUpdate={(e) => {
+                  setAudioCurrentTime(e.currentTarget.currentTime);
+                  const d = e.currentTarget.duration;
+                  if (Number.isFinite(d) && d > 0) setAudioDuration(d);
+                }}
+                onEnded={() => {
+                  setIsPlayingAudio(false);
+                  setAudioCurrentTime(0);
+                }}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={handleToggleAudio}
+                disabled={loadingAudio}
+                aria-label={isPlayingAudio ? 'Pause voice message' : 'Play voice message'}
+                className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-transform active:scale-92 ${
+                  isMe
+                    ? 'bg-white text-blue-600 hover:bg-blue-50'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                {loadingAudio ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : isPlayingAudio ? (
+                  <Pause className="w-4 h-4 fill-current" />
+                ) : (
+                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                )}
+              </button>
+
+              <div className="flex-1 min-w-0 space-y-1">
+                <div className="flex items-center justify-between gap-2 text-[11px] font-medium">
+                  <span className="inline-flex items-center gap-1 truncate">
+                    <Mic className="w-3 h-3 shrink-0 opacity-85" />
+                    <span className="truncate">Voice message</span>
+                  </span>
+                  <span className="font-mono-tabular shrink-0 opacity-90">
+                    {isPlayingAudio || audioCurrentTime > 0
+                      ? formatAudioSeconds(audioCurrentTime)
+                      : effectiveDuration > 0
+                      ? formatAudioSeconds(effectiveDuration)
+                      : fallbackDurationLabel || '0:00'}
+                  </span>
+                </div>
+                <div
+                  className={`h-1.5 rounded-full overflow-hidden ${
+                    isMe ? 'bg-white/25' : 'bg-slate-200 dark:bg-slate-700'
+                  }`}
+                >
+                  <div
+                    className={`h-full rounded-full transition-all duration-150 ${
+                      isMe ? 'bg-white' : 'bg-blue-600 dark:bg-blue-400'
+                    }`}
+                    style={{ width: `${isPlayingAudio && progressPercent === 0 ? 35 : progressPercent}%` }}
+                  />
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleDownloadFile}
+                disabled={downloadingFile}
+                aria-label="Download voice message"
+                className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                  isMe
+                    ? 'hover:bg-white/15 text-blue-100'
+                    : 'hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500'
+                }`}
+              >
+                {downloadingFile ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
+          )}
+
+          {hasFile && !isAudioAttachment && (
             <button
               type="button"
               onClick={handleDownloadFile}

@@ -22,6 +22,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { formatFileSize, prepareAttachment, triggerFileDownload } from '../lib/attachments';
 import { BleSession, connectBluetoothDevice, isWebBluetoothSupported } from '../lib/bluetooth';
 import { formatFriendlyError } from '../lib/chatService';
+import { useFloatingBadgeClearance } from '../lib/floatingBadge';
 import { t } from '../lib/i18n';
 import { buildNearbyShareUrl } from '../lib/shareLink';
 import { playIncomingTone, playSentPop, unlockAudioNow } from '../lib/sound';
@@ -52,6 +53,7 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
   const [subMode, setSubMode] = useState<'bluetooth' | 'nearby'>(
     initialNearbyCode ? 'nearby' : initialMode
   );
+  const hasNetlifyBadge = useFloatingBadgeClearance();
 
   // Web Bluetooth state
   const bleSupported = isWebBluetoothSupported();
@@ -568,26 +570,34 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
                 </div>
               )}
 
-              <form
-                onSubmit={handleSendBle}
-                className="p-4 border-t border-slate-200 dark:border-slate-800 flex items-center gap-3"
+              <div
+                className={`border-t border-slate-200 dark:border-slate-800 shrink-0 chat-composer-container${
+                  hasNetlifyBadge ? ' has-netlify-badge' : ''
+                }`}
               >
-                <input
-                  type="text"
-                  value={bleInput}
-                  onChange={(e) => setBleInput(e.target.value)}
-                  placeholder="Send text over Bluetooth GATT..."
-                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
-                />
-                <button
-                  type="submit"
-                  disabled={!bleInput.trim()}
-                  className="min-h-[44px] px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0"
+                <form
+                  onSubmit={handleSendBle}
+                  className={`p-4 flex items-center gap-3 ${
+                    hasNetlifyBadge ? 'pr-[132px] sm:pr-[184px]' : 'pr-4 sm:pr-8'
+                  }`}
                 >
-                  <Send className="w-4 h-4" />
-                  {t(lang, 'send')}
-                </button>
-              </form>
+                  <input
+                    type="text"
+                    value={bleInput}
+                    onChange={(e) => setBleInput(e.target.value)}
+                    placeholder="Send text over Bluetooth GATT..."
+                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!bleInput.trim()}
+                    className="min-h-[44px] px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0"
+                  >
+                    <Send className="w-4 h-4" />
+                    {t(lang, 'send')}
+                  </button>
+                </form>
+              </div>
             </>
           )}
         </div>
@@ -836,62 +846,78 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
                 }}
               />
 
-              <form
-                onSubmit={handleSendNearby}
-                className="p-3 sm:p-4 border-t border-slate-200 dark:border-slate-800 flex items-center gap-2"
+              <div
+                className={`border-t border-slate-200 dark:border-slate-800 shrink-0 chat-composer-container${
+                  hasNetlifyBadge ? ' has-netlify-badge' : ''
+                }`}
               >
-                <button
-                  type="button"
-                  disabled={nearbyStatus !== 'p2p-open' || nearbyPreparingAtt}
-                  onClick={() => nearbyImgRef.current?.click()}
-                  title={
-                    nearbyStatus === 'p2p-open'
-                      ? t(lang, 'uploadImage')
-                      : 'Open Direct WebRTC P2P to send photos'
-                  }
-                  className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-blue-600 dark:text-blue-400 disabled:opacity-40 hover:bg-slate-100 dark:hover:bg-slate-900 shrink-0"
+                <form
+                  onSubmit={handleSendNearby}
+                  className="p-3 sm:p-4 space-y-2"
                 >
-                  <ImagePlus className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  disabled={nearbyStatus !== 'p2p-open' || nearbyPreparingAtt}
-                  onClick={() => nearbyFileRef.current?.click()}
-                  title={
-                    nearbyStatus === 'p2p-open'
-                      ? t(lang, 'uploadFile')
-                      : 'Open Direct WebRTC P2P to send files'
-                  }
-                  className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-emerald-600 dark:text-emerald-400 disabled:opacity-40 hover:bg-slate-100 dark:hover:bg-slate-900 shrink-0"
-                >
-                  <Paperclip className="w-4 h-4" />
-                </button>
-                <input
-                  type="text"
-                  value={nearbyInput}
-                  onChange={(e) => setNearbyInput(e.target.value)}
-                  disabled={nearbyStatus === 'closed'}
-                  placeholder={t(lang, 'typeMessage')}
-                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
-                />
-                <motion.button
-                  type="submit"
-                  whileTap={{ scale: 0.92 }}
-                  disabled={(!nearbyInput.trim() && !nearbyPendingAtt) || nearbyStatus === 'closed'}
-                  className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0"
-                >
-                  <motion.span
-                    key={nearbySendPulse}
-                    initial={nearbySendPulse > 0 ? { x: -8, y: 8, scale: 0.7 } : false}
-                    animate={{ x: 0, y: 0, scale: 1 }}
-                    transition={{ type: 'spring', stiffness: 420, damping: 20 }}
-                    className="inline-flex items-center"
+                  <div
+                    className={`flex items-center gap-2 ${
+                      hasNetlifyBadge ? 'pr-[128px] sm:pr-[180px]' : 'pr-2 sm:pr-6'
+                    }`}
                   >
-                    <Send className="w-4 h-4" />
-                  </motion.span>
-                  <span className="hidden sm:inline">{t(lang, 'send')}</span>
-                </motion.button>
-              </form>
+                    <input
+                      type="text"
+                      value={nearbyInput}
+                      onChange={(e) => setNearbyInput(e.target.value)}
+                      disabled={nearbyStatus === 'closed'}
+                      placeholder={t(lang, 'typeMessage')}
+                      className="flex-1 min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <motion.button
+                      type="submit"
+                      whileTap={{ scale: 0.92 }}
+                      disabled={(!nearbyInput.trim() && !nearbyPendingAtt) || nearbyStatus === 'closed'}
+                      className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0"
+                    >
+                      <motion.span
+                        key={nearbySendPulse}
+                        initial={nearbySendPulse > 0 ? { x: -8, y: 8, scale: 0.7 } : false}
+                        animate={{ x: 0, y: 0, scale: 1 }}
+                        transition={{ type: 'spring', stiffness: 420, damping: 20 }}
+                        className="inline-flex items-center"
+                      >
+                        <Send className="w-4 h-4" />
+                      </motion.span>
+                      <span className="hidden sm:inline">{t(lang, 'send')}</span>
+                    </motion.button>
+                  </div>
+                  <div className="flex items-center gap-1.5 justify-start">
+                    <button
+                      type="button"
+                      disabled={nearbyStatus !== 'p2p-open' || nearbyPreparingAtt}
+                      onClick={() => nearbyImgRef.current?.click()}
+                      title={
+                        nearbyStatus === 'p2p-open'
+                          ? t(lang, 'uploadImage')
+                          : 'Open Direct WebRTC P2P to send photos'
+                      }
+                      className="min-h-[36px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 text-blue-600 dark:text-blue-400 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-slate-800 text-xs font-medium shrink-0"
+                    >
+                      <ImagePlus className="w-4 h-4" />
+                      <span>{t(lang, 'photoBtn')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={nearbyStatus !== 'p2p-open' || nearbyPreparingAtt}
+                      onClick={() => nearbyFileRef.current?.click()}
+                      title={
+                        nearbyStatus === 'p2p-open'
+                          ? t(lang, 'uploadFile')
+                          : 'Open Direct WebRTC P2P to send files'
+                      }
+                      className="min-h-[36px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-slate-800 text-xs font-medium shrink-0"
+                    >
+                      <Paperclip className="w-4 h-4" />
+                      <span>{t(lang, 'fileBtn')}</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
             </>
           )}
         </div>

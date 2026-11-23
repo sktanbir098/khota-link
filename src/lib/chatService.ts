@@ -59,7 +59,9 @@ export function formatFriendlyError(err: unknown): string {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.error === 'string') {
       if (parsed.error.includes('Missing or insufficient permissions')) {
-        return `Permission denied (${parsed.operationType || 'write'} on ${parsed.path || 'database'}). Please make sure you are signed in with a verified Gmail account.`;
+        const provider = parsed?.authInfo?.providerInfo?.[0]?.providerId || 'none';
+        const verified = parsed?.authInfo?.emailVerified;
+        return `Permission denied (${parsed.operationType || 'write'} on ${parsed.path || 'database'} · provider=${provider}, verified=${verified}).`;
       }
       return parsed.error;
     }
@@ -96,6 +98,7 @@ export async function ensureUserProfile(user: User): Promise<{
 }> {
   const userRef = doc(db, 'users', user.uid);
   const privateRef = doc(db, 'users', user.uid, 'private', 'info');
+  await user.getIdTokenResult(true).catch(() => null);
 
   const displayName = sanitizeStr(
     user.displayName || user.email?.split('@')[0] || 'KothaLink User',
@@ -126,7 +129,6 @@ export async function ensureUserProfile(user: User): Promise<{
   }
 
   const batch = writeBatch(db);
-
   const safeDisplayName = displayName || 'KothaLink User';
 
   if (!existingPublic) {
@@ -152,11 +154,11 @@ export async function ensureUserProfile(user: User): Promise<{
     if (typeof existingPublic.displayName !== 'string' || !existingPublic.displayName.trim()) {
       pubUpdates.displayName = safeDisplayName;
     }
-    if (typeof existingPublic.photoUrl !== 'string') {
+    if (typeof existingPublic.photoUrl !== 'string' || existingPublic.photoUrl.length > LIMITS.PHOTO_URL_MAX) {
       pubUpdates.photoUrl = photoUrl;
     }
-    if (typeof existingPublic.bio !== 'string') {
-      pubUpdates.bio = 'Available on KothaLink';
+    if (typeof existingPublic.bio !== 'string' || existingPublic.bio.length > LIMITS.BIO_MAX) {
+      pubUpdates.bio = sanitizeStr(String(existingPublic.bio || 'Available on KothaLink'), LIMITS.BIO_MAX);
     }
     if (typeof existingPublic.hasPhone !== 'boolean') {
       pubUpdates.hasPhone = false;
@@ -180,8 +182,10 @@ export async function ensureUserProfile(user: User): Promise<{
     if (email && existingPrivate.email !== email) {
       privUpdates.email = email;
     }
-    if (typeof existingPrivate.phoneNumber !== 'string') {
-      privUpdates.phoneNumber = '';
+    if (typeof existingPrivate.phoneNumber !== 'string' || !/^\+[0-9]{6,15}$/.test(existingPrivate.phoneNumber)) {
+      if (existingPrivate.phoneNumber !== '') {
+        privUpdates.phoneNumber = '';
+      }
     }
     if (existingPrivate.language !== 'en' && existingPrivate.language !== 'bn') {
       privUpdates.language = 'en';
@@ -192,31 +196,74 @@ export async function ensureUserProfile(user: User): Promise<{
     }
   }
 
-  // Register SHA-256 email directory entry so friends can find this user by Gmail
-  if (email) {
-    const emailHash = await sha256Hex(email);
-    const dirRef = doc(db, 'email_directory', emailHash);
-    let dirExists = false;
-    try {
-      const dirSnap = await getDoc(dirRef);
-      dirExists = dirSnap.exists();
-    } catch {
-      dirExists = false;
-    }
-    if (!dirExists) {
-      batch.set(dirRef, {
-        uid: user.uid,
-        displayName: existingPublic?.displayName || safeDisplayName,
-        photoUrl: existingPublic?.photoUrl || photoUrl,
-        updatedAt: serverTimestamp(),
-      });
-    }
-  }
-
   try {
     await batch.commit();
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+    // If an existing user document has legacy/extra fields or missing createdAt, repair it cleanly
+    if (existingPublic || existingPrivate) {
+      try {
+        if (existingPublic) {
+          await deleteDoc(userRef).catch(() => null);
+          await setDoc(userRef, {
+            uid: user.uid,
+            displayName: sanitizeStr(existingPublic.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User',
+            photoUrl: sanitizeStr(existingPublic.photoUrl || photoUrl, LIMITS.PHOTO_URL_MAX),
+            bio: sanitizeStr(existingPublic.bio || 'Available on KothaLink', LIMITS.BIO_MAX),
+            hasPhone: false,
+            showOnlineStatus: typeof existingPublic.showOnlineStatus === 'boolean' ? existingPublic.showOnlineStatus : true,
+            onlineStatus: 'online',
+            lastSeenAt: serverTimestamp(),
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+        if (existingPrivate) {
+          await deleteDoc(privateRef).catch(() => null);
+        }
+        await setDoc(privateRef, {
+          uid: user.uid,
+          email: email || sanitizeStr(existingPrivate?.email || '', LIMITS.EMAIL_MAX),
+          phoneNumber: '',
+          language: existingPrivate?.language === 'bn' ? 'bn' : 'en',
+          updatedAt: serverTimestamp(),
+        });
+      } catch (repairErr) {
+        handleFirestoreError(repairErr, OperationType.WRITE, `users/${user.uid}`);
+      }
+    } else {
+      handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+    }
+  }
+
+  // Register SHA-256 email directory entry in a non-blocking write so a stale directory doc never blocks sign-in
+  if (email) {
+    try {
+      const emailHash = await sha256Hex(email);
+      const dirRef = doc(db, 'email_directory', emailHash);
+      const dirSnap = await getDoc(dirRef).catch(() => null);
+      const dirName = sanitizeStr(existingPublic?.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
+      const dirPhoto = sanitizeStr(existingPublic?.photoUrl || photoUrl, LIMITS.PHOTO_URL_MAX);
+
+      if (!dirSnap || !dirSnap.exists()) {
+        await setDoc(dirRef, {
+          uid: user.uid,
+          displayName: dirName,
+          photoUrl: dirPhoto,
+          updatedAt: serverTimestamp(),
+        });
+      } else if (dirSnap.data()?.uid === user.uid) {
+        const existingDir = dirSnap.data();
+        if (existingDir?.displayName !== dirName || existingDir?.photoUrl !== dirPhoto) {
+          await updateDoc(dirRef, {
+            displayName: dirName,
+            photoUrl: dirPhoto,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+    } catch {
+      // Non-fatal: user profile is already saved
+    }
   }
 
   const [freshPub, freshPriv] = await Promise.all([
@@ -783,6 +830,8 @@ export async function sendChatMessage(params: {
     ? cleanText
     : attachmentType === 'image'
     ? `Photo: ${attachmentName}`
+    : attachmentMime.startsWith('audio/')
+    ? `🎤 ${attachmentName}`
     : `File: ${attachmentName}`;
 
   const batch = writeBatch(db);

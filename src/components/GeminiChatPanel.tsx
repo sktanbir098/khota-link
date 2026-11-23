@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ArrowLeft, RotateCcw, Send, Square, X, Zap } from 'lucide-react';
+import { useFloatingBadgeClearance } from '../lib/floatingBadge';
 import { t } from '../lib/i18n';
 import { playIncomingTone, playSentPop, unlockAudioNow } from '../lib/sound';
 import { AppLanguage, GeminiChatTurn, ReactionEmoji } from '../types/chat';
@@ -37,6 +38,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
   const [streamingTurnId, setStreamingTurnId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [sendPulseKey, setSendPulseKey] = useState(0);
+  const hasNetlifyBadge = useFloatingBadgeClearance();
 
   const endRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -459,50 +461,58 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
       )}
 
       {/* Composer with Stop & Streaming Feedback */}
-      <form
-        onSubmit={(e) => handleSend(e)}
-        className="p-3 sm:p-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center gap-2.5 shrink-0"
+      <div
+        className={`border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shrink-0 chat-composer-container${
+          hasNetlifyBadge ? ' has-netlify-badge' : ''
+        }`}
       >
-        <input
-          type="text"
-          maxLength={2000}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={
-            lang === 'bn' ? 'Gemini কে যেকোনো প্রশ্ন করুন...' : 'Ask Gemini anything...'
-          }
-          className="flex-1 min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
-        />
-        {loading ? (
-          <motion.button
-            type="button"
-            whileTap={{ scale: 0.92 }}
-            onClick={stopGeneration}
-            className="min-h-[44px] px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0"
-          >
-            <Square className="w-3.5 h-3.5 fill-current" />
-            <span className="hidden sm:inline">{t(lang, 'stopGenerating')}</span>
-          </motion.button>
-        ) : (
-          <motion.button
-            type="submit"
-            whileTap={{ scale: 0.92 }}
-            disabled={!input.trim()}
-            className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
-          >
-            <motion.span
-              key={sendPulseKey}
-              initial={sendPulseKey > 0 ? { x: -8, y: 8, scale: 0.7 } : false}
-              animate={{ x: 0, y: 0, scale: 1 }}
-              transition={{ type: 'spring', stiffness: 420, damping: 20 }}
-              className="inline-flex items-center"
+        <form
+          onSubmit={(e) => handleSend(e)}
+          className={`p-3 sm:p-4 flex items-center gap-2.5 ${
+            hasNetlifyBadge ? 'pr-[132px] sm:pr-[184px]' : 'pr-4 sm:pr-8'
+          }`}
+        >
+          <input
+            type="text"
+            maxLength={2000}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={
+              lang === 'bn' ? 'Gemini কে যেকোনো প্রশ্ন করুন...' : 'Ask Gemini anything...'
+            }
+            className="flex-1 min-h-[44px] px-4 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+          />
+          {loading ? (
+            <motion.button
+              type="button"
+              whileTap={{ scale: 0.92 }}
+              onClick={stopGeneration}
+              className="min-h-[44px] px-4 rounded-xl bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0"
             >
-              <Send className="w-4 h-4" />
-            </motion.span>
-            <span className="hidden sm:inline">{t(lang, 'send')}</span>
-          </motion.button>
-        )}
-      </form>
+              <Square className="w-3.5 h-3.5 fill-current" />
+              <span className="hidden sm:inline">{t(lang, 'stopGenerating')}</span>
+            </motion.button>
+          ) : (
+            <motion.button
+              type="submit"
+              whileTap={{ scale: 0.92 }}
+              disabled={!input.trim()}
+              className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium flex items-center gap-2 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <motion.span
+                key={sendPulseKey}
+                initial={sendPulseKey > 0 ? { x: -8, y: 8, scale: 0.7 } : false}
+                animate={{ x: 0, y: 0, scale: 1 }}
+                transition={{ type: 'spring', stiffness: 420, damping: 20 }}
+                className="inline-flex items-center"
+              >
+                <Send className="w-4 h-4" />
+              </motion.span>
+              <span className="hidden sm:inline">{t(lang, 'send')}</span>
+            </motion.button>
+          )}
+        </form>
+      </div>
     </div>
   );
 };
