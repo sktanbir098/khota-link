@@ -104,6 +104,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
   const latestOfferSdpRef = useRef<string>(activeCall.initialSession?.offerSdp || '');
   const cleanedUpRef = useRef(false);
   const closingRef = useRef(false);
+  const userEndedRef = useRef(false);
   const connectedStartedRef = useRef(false);
   const connectedAtMsRef = useRef<number | null>(null);
   const elapsedSecRef = useRef(0);
@@ -512,6 +513,10 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
         });
 
         callDocCreatedRef.current = true;
+        if (userEndedRef.current || cancelled || closingRef.current) {
+          void updateCallStatus({ callId: call.callId, status: 'ended' });
+          return;
+        }
         while (outgoingIceQueueRef.current.length > 0) {
           const cand = outgoingIceQueueRef.current.shift();
           if (cand) {
@@ -523,12 +528,12 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
           }
         }
 
-        if (!cancelled && !connectedStartedRef.current) {
+        if (!cancelled && !connectedStartedRef.current && !userEndedRef.current) {
           setPhase('ringing-outgoing');
           setStatusLabel(t(langRef.current, 'ringingPeer'));
           startRingtone('ringback');
           missTimer = window.setTimeout(() => {
-            if (!closingRef.current && !connectedStartedRef.current) {
+            if (!closingRef.current && !connectedStartedRef.current && !userEndedRef.current) {
               void updateCallStatus({ callId: call.callId, status: 'missed' });
               finishAndClose(t(langRef.current, 'callMissed'), 1150);
             }
@@ -616,9 +621,20 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
     };
   }, [phase]);
 
-  // Safety cleanup on unmount
+  // Safety cleanup on unmount & abrupt browser tab close (pagehide)
   useEffect(() => {
+    const onPageHide = () => {
+      if (!closingRef.current) {
+        userEndedRef.current = true;
+        if (callDocCreatedRef.current) {
+          void updateCallStatus({ callId: activeCallRef.current.callId, status: 'ended' });
+        }
+      }
+      teardownMediaAndPc();
+    };
+    window.addEventListener('pagehide', onPageHide);
     return () => {
+      window.removeEventListener('pagehide', onPageHide);
       teardownMediaAndPc();
     };
   }, [teardownMediaAndPc]);
@@ -664,16 +680,20 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
     }
   };
 
-  const handleDeclineIncoming = async () => {
+  const handleDeclineIncoming = () => {
     unlockAudioNow();
+    userEndedRef.current = true;
     stopRingtone();
-    await updateCallStatus({ callId: activeCall.callId, status: 'declined' });
+    void updateCallStatus({ callId: activeCall.callId, status: 'declined' });
     finishAndClose(t(lang, 'callDeclined'), 850);
   };
 
-  const handleHangup = async () => {
+  const handleHangup = () => {
+    userEndedRef.current = true;
     stopRingtone();
-    await updateCallStatus({ callId: activeCall.callId, status: 'ended' });
+    if (callDocCreatedRef.current) {
+      void updateCallStatus({ callId: activeCall.callId, status: 'ended' });
+    }
     finishAndClose(t(lang, 'callEnded'), 1050);
   };
 
@@ -746,7 +766,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
           initial={{ opacity: 0, y: -14, scale: 0.92 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -14, scale: 0.92 }}
-          className="fixed top-3 right-3 z-[60] max-w-[92vw] bg-slate-900/95 text-white border border-slate-700/80 rounded-2xl shadow-2xl px-3.5 py-2.5 flex items-center gap-3 backdrop-blur-md"
+          className="fixed top-3 right-3 z-[60] max-w-[92vw] bg-slate-900/80 text-white border border-white/20 rounded-2xl shadow-2xl px-3.5 py-2.5 flex items-center gap-3 backdrop-blur-2xl"
         >
           <UserAvatar
             name={activeCall.peerName}
@@ -772,7 +792,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
               onClick={toggleMic}
               aria-label={micMuted ? t(lang, 'unmuteMic') : t(lang, 'muteMic')}
               className={`min-h-[36px] min-w-[36px] rounded-xl flex items-center justify-center transition-colors ${
-                micMuted ? 'bg-amber-500 text-slate-950' : 'bg-white/10 hover:bg-white/20 text-white'
+                micMuted ? 'bg-amber-500 text-slate-950' : 'bg-white/15 hover:bg-white/25 text-white border border-white/15'
               }`}
             >
               {micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
@@ -781,14 +801,14 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
               type="button"
               onClick={() => setMinimized(false)}
               aria-label={t(lang, 'expandCall')}
-              className="min-h-[36px] min-w-[36px] rounded-xl bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
+              className="min-h-[36px] min-w-[36px] rounded-xl bg-white/15 hover:bg-white/25 border border-white/15 text-white flex items-center justify-center"
             >
               <Maximize2 className="w-4 h-4" />
             </button>
             <motion.button
               type="button"
               whileTap={{ scale: 0.9 }}
-              onClick={() => void handleHangup()}
+              onClick={handleHangup}
               aria-label={t(lang, 'endCall')}
               className="min-h-[36px] min-w-[36px] rounded-xl bg-red-600 hover:bg-red-700 text-white flex items-center justify-center"
             >
@@ -801,7 +821,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[60] bg-slate-950/92 backdrop-blur-md flex items-center justify-center p-0 sm:p-4"
+          className="fixed inset-0 z-[60] bg-slate-950/90 backdrop-blur-2xl flex items-center justify-center p-0 sm:p-4"
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.94, y: 18 }}
@@ -812,7 +832,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
             }
             exit={{ opacity: 0, scale: 0.9, y: 20 }}
             transition={{ type: 'spring', stiffness: 320, damping: 28 }}
-            className="relative w-full h-[100dvh] sm:h-[86dvh] sm:max-h-[760px] sm:max-w-lg sm:rounded-3xl overflow-hidden bg-gradient-to-b from-slate-900 via-slate-950 to-black border-0 sm:border sm:border-white/10 shadow-2xl flex flex-col justify-between text-white"
+            className="relative w-full h-[100dvh] sm:h-[86dvh] sm:max-h-[760px] sm:max-w-lg sm:rounded-3xl overflow-hidden bg-gradient-to-b from-slate-900/95 via-slate-950/95 to-black/95 border-0 sm:border sm:border-white/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_24px_64px_rgba(0,0,0,0.5)] flex flex-col justify-between text-white"
           >
             {/* Dynamic Ambient Backdrop Glow based on Call State */}
             <div
@@ -1131,7 +1151,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                     type="button"
                     whileHover={{ scale: 1.06, rotate: -6 }}
                     whileTap={{ scale: 0.88 }}
-                    onClick={() => void handleDeclineIncoming()}
+                    onClick={handleDeclineIncoming}
                     className="flex flex-col items-center gap-2"
                   >
                     <span className="w-16 h-16 rounded-full bg-red-600 hover:bg-red-700 text-white flex items-center justify-center shadow-lg shadow-red-600/35 transition-colors">
@@ -1175,10 +1195,10 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                     whileTap={{ scale: 0.9 }}
                     onClick={toggleMic}
                     aria-label={micMuted ? t(lang, 'unmuteMic') : t(lang, 'muteMic')}
-                    className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors ${
+                    className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors backdrop-blur-xl border ${
                       micMuted
-                        ? 'bg-amber-500 text-slate-950'
-                        : 'bg-white/15 hover:bg-white/25 text-white'
+                        ? 'bg-amber-500 border-amber-400 text-slate-950'
+                        : 'bg-white/15 border-white/20 hover:bg-white/25 text-white'
                     }`}
                   >
                     {micMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
@@ -1194,10 +1214,10 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                         whileTap={{ scale: 0.9 }}
                         onClick={toggleCamera}
                         aria-label={camOff ? t(lang, 'cameraOn') : t(lang, 'cameraOff')}
-                        className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors ${
+                        className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors backdrop-blur-xl border ${
                           camOff
-                            ? 'bg-amber-500 text-slate-950'
-                            : 'bg-white/15 hover:bg-white/25 text-white'
+                            ? 'bg-amber-500 border-amber-400 text-slate-950'
+                            : 'bg-white/15 border-white/20 hover:bg-white/25 text-white'
                         }`}
                       >
                         {camOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
@@ -1211,7 +1231,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                         whileTap={{ scale: 0.9 }}
                         onClick={() => void switchCamera()}
                         aria-label={t(lang, 'switchCamera')}
-                        className="min-h-[52px] min-w-[52px] px-3.5 rounded-2xl bg-white/15 hover:bg-white/25 text-white flex flex-col items-center justify-center gap-1 transition-colors"
+                        className="min-h-[52px] min-w-[52px] px-3.5 rounded-2xl bg-white/15 border border-white/20 hover:bg-white/25 backdrop-blur-xl text-white flex flex-col items-center justify-center gap-1 transition-colors"
                       >
                         <RefreshCw className="w-5 h-5" />
                         <span className="text-[10px] font-medium whitespace-nowrap">
@@ -1225,7 +1245,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                     type="button"
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.88, rotate: -12 }}
-                    onClick={() => void handleHangup()}
+                    onClick={handleHangup}
                     aria-label={t(lang, 'endCall')}
                     className="min-h-[52px] min-w-[64px] px-5 rounded-2xl bg-red-600 hover:bg-red-700 text-white flex flex-col items-center justify-center gap-1 shadow-lg shadow-red-600/35 transition-colors"
                   >

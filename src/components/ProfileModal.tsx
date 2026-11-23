@@ -1,19 +1,24 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowLeft,
   Bell,
   BellRing,
   Check,
+  ChevronDown,
+  ChevronUp,
   CornerDownLeft,
+  Droplets,
   Eye,
   EyeOff,
   Loader2,
   LogOut,
   Moon,
+  RotateCcw,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Sun,
   Trash2,
   User,
@@ -23,13 +28,16 @@ import {
 } from 'lucide-react';
 import { formatFriendlyError, updateUserSettings } from '../lib/chatService';
 import { t } from '../lib/i18n';
-import { AppLanguage, UserPrivateInfo, UserPublicProfile } from '../types/chat';
+import { AppLanguage, AppTheme, UserPrivateInfo, UserPublicProfile } from '../types/chat';
 import { UserAvatar } from './UserAvatar';
 
 interface Props {
   isOpen: boolean;
+  initialTab?: 'profile' | 'settings' | 'account';
   lang: AppLanguage;
-  darkMode: boolean;
+  themeMode: AppTheme;
+  glassBlur: number;
+  glassSaturation: number;
   soundOn: boolean;
   notifPermission: NotificationPermission | 'unsupported';
   enterToSend: boolean;
@@ -42,7 +50,10 @@ interface Props {
     language: AppLanguage;
     showOnlineStatus: boolean;
   }) => void;
-  onToggleTheme: (dark: boolean) => void;
+  onChangeTheme: (mode: AppTheme) => void;
+  onChangeGlassBlur: (blur: number) => void;
+  onChangeGlassSaturation: (saturation: number) => void;
+  onResetGlass: () => void;
   onToggleSound: () => void;
   onRequestBgNotifications: () => void;
   onToggleEnterToSend: (val: boolean) => void;
@@ -95,8 +106,11 @@ const AnimatedSwitch: React.FC<AnimatedSwitchProps> = ({ checked, onToggle, labe
 
 export const ProfileModal: React.FC<Props> = ({
   isOpen,
+  initialTab = 'profile',
   lang,
-  darkMode,
+  themeMode,
+  glassBlur,
+  glassSaturation,
   soundOn,
   notifPermission,
   enterToSend,
@@ -104,14 +118,17 @@ export const ProfileModal: React.FC<Props> = ({
   privateInfo,
   onClose,
   onUpdated,
-  onToggleTheme,
+  onChangeTheme,
+  onChangeGlassBlur,
+  onChangeGlassSaturation,
+  onResetGlass,
   onToggleSound,
   onRequestBgNotifications,
   onToggleEnterToSend,
   onSignOut,
   onDeleteAccount,
 }) => {
-  const [activeTab, setActiveTab] = useState<'profile' | 'settings' | 'account'>('profile');
+  const [activeTab, setActiveTab] = useState<'profile' | 'settings' | 'account'>(initialTab);
   const [displayName, setDisplayName] = useState(publicProfile.displayName);
   const [bio, setBio] = useState(publicProfile.bio || '');
   const [selectedLang, setSelectedLang] = useState<AppLanguage>(lang);
@@ -123,8 +140,22 @@ export const ProfileModal: React.FC<Props> = ({
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [error, setError] = useState('');
+  const [glassTunerCollapsed, setGlassTunerCollapsed] = useState(false);
+  const [isDraggingGlass, setIsDraggingGlass] = useState(false);
+  const [glassLivePeek, setGlassLivePeek] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(initialTab);
+      setGlassLivePeek(false);
+      setIsDraggingGlass(false);
+    }
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
+
+  const isPreviewClear = activeTab === 'settings' && (isDraggingGlass || glassLivePeek);
+  const isDefaultGlass = glassBlur === 14 && glassSaturation === 205;
 
   const bioPresets = selectedLang === 'bn' ? BIO_PRESETS_BN : BIO_PRESETS_EN;
 
@@ -183,22 +214,36 @@ export const ProfileModal: React.FC<Props> = ({
   ];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm flex items-center justify-center p-4">
+    <div
+      className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-all duration-200 ${
+        isPreviewClear
+          ? 'bg-black/5 backdrop-blur-none'
+          : themeMode === 'glass'
+          ? 'bg-slate-900/15 backdrop-blur-[2px]'
+          : 'bg-black/55 backdrop-blur-sm'
+      } ${activeTab === 'settings' && !glassTunerCollapsed ? 'pb-44 sm:pb-48' : ''}`}
+    >
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
+        animate={{
+          opacity: glassLivePeek && activeTab === 'settings' ? 0.14 : isDraggingGlass ? 0.45 : 1,
+          scale: glassLivePeek && activeTab === 'settings' ? 0.97 : 1,
+          y: 0,
+        }}
         exit={{ opacity: 0, scale: 0.95, y: 8 }}
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-2xl max-h-[90dvh] flex flex-col"
+        className={`w-full max-w-md bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-2xl max-h-[82dvh] flex flex-col ${
+          glassLivePeek && activeTab === 'settings' ? 'pointer-events-none' : ''
+        }`}
       >
         {/* Header with Top-Left Back Button */}
-        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
+        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 liquid-divider flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
               onClick={onClose}
               aria-label={t(lang, 'backBtn')}
-              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shrink-0 transition-colors"
+              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 liquid-control border border-transparent hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shrink-0 transition-colors"
             >
               <ArrowLeft className="w-4 h-4" />
             </button>
@@ -218,7 +263,7 @@ export const ProfileModal: React.FC<Props> = ({
 
         {/* Animated 3-Tab Switcher */}
         <div className="px-6 pt-4 shrink-0">
-          <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+          <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               const active = activeTab === tab.id;
@@ -237,7 +282,7 @@ export const ProfileModal: React.FC<Props> = ({
                     <motion.span
                       layoutId="profileModalTabIndicator"
                       transition={{ type: 'spring', stiffness: 450, damping: 34 }}
-                      className="absolute inset-0 rounded-lg bg-white dark:bg-slate-800 shadow-sm -z-10"
+                      className="absolute inset-0 rounded-lg bg-white dark:bg-slate-800 liquid-pill-active shadow-sm -z-10"
                     />
                   )}
                   <Icon className="w-3.5 h-3.5 shrink-0" />
@@ -261,7 +306,7 @@ export const ProfileModal: React.FC<Props> = ({
                   className="space-y-4"
                 >
                   {/* Profile Avatar & Bio Card */}
-                  <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+                  <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800">
                     <UserAvatar
                       name={displayName.trim() || publicProfile.displayName}
                       photoUrl={publicProfile.photoUrl}
@@ -293,7 +338,7 @@ export const ProfileModal: React.FC<Props> = ({
                       maxLength={80}
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
-                      className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
                     />
                   </div>
 
@@ -313,7 +358,7 @@ export const ProfileModal: React.FC<Props> = ({
                       value={bio}
                       onChange={(e) => setBio(e.target.value)}
                       placeholder={t(lang, 'bioPlaceholder')}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-600"
                     />
                     <div className="space-y-1">
                       <span className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">
@@ -355,18 +400,64 @@ export const ProfileModal: React.FC<Props> = ({
                     <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                       {t(lang, 'appearanceSection')}
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-3">
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
+                          {t(lang, 'themeLabel')}
+                        </label>
+                        <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-950 liquid-control rounded-xl border border-slate-200 dark:border-slate-800">
+                          {(
+                            [
+                              { id: 'glass' as const, label: t(lang, 'glassMode'), Icon: Droplets },
+                              { id: 'dark' as const, label: t(lang, 'darkMode'), Icon: Moon },
+                              { id: 'light' as const, label: t(lang, 'lightMode'), Icon: Sun },
+                            ] as const
+                          ).map((opt) => {
+                            const active = themeMode === opt.id;
+                            const Icon = opt.Icon;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => onChangeTheme(opt.id)}
+                                className={`relative z-10 min-h-[38px] py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                                  active
+                                    ? opt.id === 'dark'
+                                      ? 'text-white'
+                                      : 'text-slate-900 dark:text-white'
+                                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                                }`}
+                              >
+                                {active && (
+                                  <motion.span
+                                    layoutId="profileThemeIndicator"
+                                    transition={{ type: 'spring', stiffness: 460, damping: 32 }}
+                                    className={`absolute inset-0 rounded-lg -z-10 shadow-sm ${
+                                      opt.id === 'dark'
+                                        ? 'bg-slate-800'
+                                        : 'bg-white dark:bg-slate-800 liquid-pill-active'
+                                    }`}
+                                  />
+                                )}
+                                <Icon className={`w-3.5 h-3.5 shrink-0 ${opt.id === 'glass' && active ? 'text-blue-600' : ''}`} />
+                                <span>{opt.label}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
                       <div className="space-y-1.5">
                         <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
                           {t(lang, 'languageLabel')}
                         </label>
-                        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
+                        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-950 liquid-control rounded-xl border border-slate-200 dark:border-slate-800">
                           <button
                             type="button"
                             onClick={() => setSelectedLang('en')}
                             className={`py-1.5 rounded-lg text-xs font-medium transition-colors ${
                               selectedLang === 'en'
-                                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                                ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
                                 : 'text-slate-600 dark:text-slate-400'
                             }`}
                           >
@@ -377,39 +468,11 @@ export const ProfileModal: React.FC<Props> = ({
                             onClick={() => setSelectedLang('bn')}
                             className={`py-1.5 rounded-lg text-xs font-medium transition-colors ${
                               selectedLang === 'bn'
-                                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                                ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
                                 : 'text-slate-600 dark:text-slate-400'
                             }`}
                           >
                             বাংলা
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
-                          {t(lang, 'themeLabel')}
-                        </label>
-                        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
-                          <button
-                            type="button"
-                            onClick={() => onToggleTheme(false)}
-                            className={`py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1 transition-colors ${
-                              !darkMode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400'
-                            }`}
-                          >
-                            <Sun className="w-3.5 h-3.5" />
-                            {t(lang, 'lightMode')}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onToggleTheme(true)}
-                            className={`py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1 transition-colors ${
-                              darkMode ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-600'
-                            }`}
-                          >
-                            <Moon className="w-3.5 h-3.5" />
-                            {t(lang, 'darkMode')}
                           </button>
                         </div>
                       </div>
@@ -422,7 +485,7 @@ export const ProfileModal: React.FC<Props> = ({
                       {t(lang, 'notificationsSection')}
                     </div>
 
-                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3.5">
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 space-y-3.5">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-start gap-2.5 min-w-0">
                           {soundOn ? (
@@ -496,7 +559,7 @@ export const ProfileModal: React.FC<Props> = ({
                       {t(lang, 'privacySection')}
                     </div>
 
-                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3.5">
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 space-y-3.5">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-start gap-2.5 min-w-0">
                           {showOnlineStatus ? (
@@ -520,7 +583,7 @@ export const ProfileModal: React.FC<Props> = ({
                         />
                       </div>
 
-                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 liquid-divider flex items-center justify-between gap-3">
                         <div className="flex items-start gap-2.5 min-w-0">
                           <CornerDownLeft className="w-4 h-4 text-blue-600 dark:text-blue-400 mt-0.5 shrink-0" />
                           <div className="min-w-0">
@@ -568,7 +631,7 @@ export const ProfileModal: React.FC<Props> = ({
                     type="button"
                     whileTap={{ scale: 0.98 }}
                     onClick={onSignOut}
-                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center justify-center gap-2 transition-colors"
+                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 liquid-control hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center justify-center gap-2 transition-colors"
                   >
                     <LogOut className="w-4 h-4" />
                     {t(lang, 'signOut')}
@@ -634,11 +697,11 @@ export const ProfileModal: React.FC<Props> = ({
 
           {/* Sticky Footer Save Action */}
           {activeTab !== 'account' && (
-            <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between gap-3 shrink-0">
+            <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 liquid-surface liquid-divider flex items-center justify-between gap-3 shrink-0">
               <button
                 type="button"
                 onClick={onClose}
-                className="min-h-[42px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                className="min-h-[42px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 liquid-control text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
               >
                 {t(lang, 'cancel')}
               </button>
@@ -666,6 +729,163 @@ export const ProfileModal: React.FC<Props> = ({
           )}
         </form>
       </motion.div>
+
+      {/* Floating Real-Time Liquid Glass Blur & Saturation Tuner (visible in Settings) */}
+      <AnimatePresence>
+        {activeTab === 'settings' && (
+          <motion.div
+            key="floating-glass-tuner"
+            initial={{ opacity: 0, y: 24, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 360, damping: 28 }}
+            className="fixed bottom-3 left-3 right-3 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:w-full sm:max-w-md z-[60] rounded-2xl bg-white/85 dark:bg-slate-900/90 liquid-modal border border-slate-200/90 dark:border-slate-700/80 shadow-[0_20px_54px_rgba(15,23,42,0.24)] backdrop-blur-2xl overflow-hidden"
+          >
+            {/* Floating Control Header */}
+            <div className="px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-slate-200/70 dark:border-slate-800/80 liquid-divider">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="w-7 h-7 rounded-lg bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                  <Sparkles className="w-3.5 h-3.5" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                    {t(lang, 'glassControlsTitle')}
+                  </div>
+                  <div className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400 truncate">
+                    {glassBlur}px · {glassSaturation}%
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0">
+                {themeMode !== 'glass' ? (
+                  <button
+                    type="button"
+                    onClick={() => onChangeTheme('glass')}
+                    className="min-h-[34px] px-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold whitespace-nowrap transition-colors"
+                  >
+                    {t(lang, 'glassActivateBtn')}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setGlassLivePeek((v) => !v)}
+                    aria-pressed={glassLivePeek}
+                    className={`min-h-[34px] px-2.5 rounded-xl text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap transition-colors ${
+                      glassLivePeek
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-100 dark:bg-slate-800 liquid-control border border-transparent text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    {glassLivePeek ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    <span>{t(lang, 'glassPreviewPeek')}</span>
+                  </button>
+                )}
+
+                {!isDefaultGlass && (
+                  <button
+                    type="button"
+                    onClick={onResetGlass}
+                    title={t(lang, 'glassResetBtn')}
+                    aria-label={t(lang, 'glassResetBtn')}
+                    className="min-h-[34px] min-w-[34px] px-2 rounded-xl bg-slate-100 dark:bg-slate-800 liquid-control border border-transparent hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-medium flex items-center justify-center gap-1 transition-colors"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setGlassTunerCollapsed((v) => !v)}
+                  aria-label={glassTunerCollapsed ? 'Expand Glass controls' : 'Collapse Glass controls'}
+                  className="min-h-[34px] min-w-[34px] rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center transition-colors"
+                >
+                  {glassTunerCollapsed ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Sliders Body */}
+            {!glassTunerCollapsed && (
+              <div className="px-4 py-3 space-y-3">
+                {themeMode !== 'glass' && (
+                  <div className="text-[11px] text-amber-700 dark:text-amber-300 font-medium">
+                    {t(lang, 'glassSwitchHint')}
+                  </div>
+                )}
+
+                {/* Blur Intensity Slider */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <label
+                      htmlFor="glass-blur-slider"
+                      className="font-medium text-slate-700 dark:text-slate-200"
+                    >
+                      {t(lang, 'glassBlurLabel')}
+                    </label>
+                    <span className="font-mono-tabular font-semibold text-blue-600 dark:text-blue-400">
+                      {glassBlur}px
+                    </span>
+                  </div>
+                  <input
+                    id="glass-blur-slider"
+                    type="range"
+                    min={2}
+                    max={48}
+                    step={1}
+                    value={glassBlur}
+                    onPointerDown={() => setIsDraggingGlass(true)}
+                    onPointerUp={() => setIsDraggingGlass(false)}
+                    onPointerCancel={() => setIsDraggingGlass(false)}
+                    onBlur={() => setIsDraggingGlass(false)}
+                    onChange={(e) => {
+                      if (themeMode !== 'glass') onChangeTheme('glass');
+                      onChangeGlassBlur(Number(e.target.value));
+                    }}
+                    className="w-full glass-slider"
+                  />
+                </div>
+
+                {/* Saturation Level Slider */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <label
+                      htmlFor="glass-saturation-slider"
+                      className="font-medium text-slate-700 dark:text-slate-200"
+                    >
+                      {t(lang, 'glassSaturationLabel')}
+                    </label>
+                    <span className="font-mono-tabular font-semibold text-blue-600 dark:text-blue-400">
+                      {glassSaturation}%
+                    </span>
+                  </div>
+                  <input
+                    id="glass-saturation-slider"
+                    type="range"
+                    min={100}
+                    max={260}
+                    step={5}
+                    value={glassSaturation}
+                    onPointerDown={() => setIsDraggingGlass(true)}
+                    onPointerUp={() => setIsDraggingGlass(false)}
+                    onPointerCancel={() => setIsDraggingGlass(false)}
+                    onBlur={() => setIsDraggingGlass(false)}
+                    onChange={(e) => {
+                      if (themeMode !== 'glass') onChangeTheme('glass');
+                      onChangeGlassSaturation(Number(e.target.value));
+                    }}
+                    className="w-full glass-slider"
+                  />
+                </div>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

@@ -231,9 +231,9 @@ export const MessageBubble: React.FC<Props> = ({
         animateSend
           ? {
               opacity: 0,
-              y: 24,
-              x: 24,
-              scale: 0.88,
+              y: 30,
+              x: 20,
+              scale: 0.72,
             }
           : animateArrival
           ? {
@@ -244,19 +244,26 @@ export const MessageBubble: React.FC<Props> = ({
             }
           : false
       }
-      animate={{
-        opacity: 1,
-        y: 0,
-        x: 0,
-        scale: 1,
-      }}
+      animate={
+        animateSend
+          ? {
+              opacity: 1,
+              y: [30, -4, 0],
+              x: 0,
+              scale: [0.72, 1.055, 1],
+            }
+          : {
+              opacity: 1,
+              y: 0,
+              x: 0,
+              scale: 1,
+            }
+      }
       transition={
         animateSend
           ? {
-              type: 'spring',
-              stiffness: 340,
-              damping: 24,
-              mass: 0.8,
+              duration: 0.44,
+              ease: [0.22, 1.28, 0.36, 1],
             }
           : animateArrival
           ? {
@@ -279,7 +286,7 @@ export const MessageBubble: React.FC<Props> = ({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 4, scale: 0.94 }}
             transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
-            className={`z-20 mb-1.5 px-2 py-1.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-lg flex items-center gap-1 ${
+            className={`z-20 mb-1.5 px-2 py-1.5 rounded-2xl bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-700 shadow-lg flex items-center gap-1 ${
               isMe ? 'self-end' : 'self-start'
             }`}
           >
@@ -300,7 +307,17 @@ export const MessageBubble: React.FC<Props> = ({
         )}
       </AnimatePresence>
 
-      <div className={`flex items-end gap-1.5 max-w-full ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
+      <div className={`relative flex items-end gap-1.5 max-w-full ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
+        {/* Soft bubble-pop halo ring on newly sent outgoing message */}
+        {animateSend && (
+          <motion.span
+            aria-hidden="true"
+            initial={{ scale: 0.78, opacity: 0.72 }}
+            animate={{ scale: 1.18, opacity: 0 }}
+            transition={{ duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
+            className="pointer-events-none absolute -inset-1 rounded-3xl border-2 border-blue-400/70 dark:border-blue-300/50"
+          />
+        )}
         {/* Message Bubble (supports 420ms long-press on touch or mouse) */}
         <div
           onPointerDown={startLongPress}
@@ -315,18 +332,18 @@ export const MessageBubble: React.FC<Props> = ({
             hasImage && !text && !replyToText ? 'p-1.5' : 'px-4 py-2.5'
           } ${
             isMe
-              ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/20'
-              : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100'
+              ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/20 liquid-bubble-me'
+              : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 liquid-bubble-peer'
           }`}
         >
           {/* Send launch sheen sweep when outgoing message is sent */}
           {animateSend && (
             <motion.span
               aria-hidden="true"
-              initial={{ x: '-120%', opacity: 0.65 }}
+              initial={{ x: '-120%', opacity: 0.75 }}
               animate={{ x: '220%', opacity: 0 }}
-              transition={{ duration: 0.75, ease: [0.16, 1, 0.3, 1] }}
-              className="pointer-events-none absolute inset-y-0 w-1/2 -skew-x-12 bg-gradient-to-r from-transparent via-white/35 to-transparent"
+              transition={{ duration: 0.78, ease: [0.16, 1, 0.3, 1] }}
+              className="pointer-events-none absolute inset-y-0 w-1/2 -skew-x-12 bg-gradient-to-r from-transparent via-white/40 to-transparent"
             />
           )}
           {/* Subtle arrival shimmer sweep when a new incoming message arrives */}
@@ -397,8 +414,8 @@ export const MessageBubble: React.FC<Props> = ({
                 text ? 'mb-2' : ''
               } ${
                 isMe
-                  ? 'bg-blue-700/60 border-blue-400/40 text-white'
-                  : 'bg-slate-50 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
+                  ? 'bg-blue-700/50 border-white/25 text-white'
+                  : 'bg-slate-50 dark:bg-slate-800/80 liquid-control border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
               }`}
             >
               <audio
@@ -497,8 +514,8 @@ export const MessageBubble: React.FC<Props> = ({
                 text ? 'mb-2' : ''
               } ${
                 isMe
-                  ? 'bg-blue-700/60 border-blue-400/40 hover:bg-blue-700 text-white'
-                  : 'bg-slate-50 dark:bg-slate-800/70 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-900 dark:text-slate-100'
+                  ? 'bg-blue-700/50 border-white/25 hover:bg-blue-700/70 text-white'
+                  : 'bg-slate-50 dark:bg-slate-800/70 liquid-control border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-900 dark:text-slate-100'
               }`}
             >
               <div
@@ -614,8 +631,8 @@ export const MessageBubble: React.FC<Props> = ({
                 onClick={() => onReact(r.emoji)}
                 className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-xs font-mono-tabular transition-colors ${
                   r.reactedByMe
-                    ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300'
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    ? 'bg-blue-50 dark:bg-blue-950/60 liquid-pill-active border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                    : 'bg-white dark:bg-slate-900 liquid-control border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
               >
                 <span>{r.emoji}</span>

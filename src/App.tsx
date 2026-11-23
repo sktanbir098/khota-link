@@ -9,6 +9,7 @@ import {
   Check,
   Copy,
   Download,
+  Droplets,
   FileText,
   ImagePlus,
   KeyRound,
@@ -87,6 +88,7 @@ import {
 import { generateCallId, subscribeIncomingCalls } from './lib/callService';
 import {
   AppLanguage,
+  AppTheme,
   CallMode,
   ChatMessage,
   ChatRoom,
@@ -142,10 +144,24 @@ function formatTime(ts: { toDate?: () => Date } | null | undefined, isOptimistic
 }
 
 export default function App() {
-  // Theme & language
-  const [darkMode, setDarkMode] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return localStorage.getItem('kl_theme') === 'dark';
+  // Theme (Glass | Dark | Light) & language
+  const [themeMode, setThemeMode] = useState<AppTheme>(() => {
+    if (typeof window === 'undefined') return 'glass';
+    const stored = localStorage.getItem('kl_theme');
+    if (stored === 'dark' || stored === 'light' || stored === 'glass') return stored;
+    return 'glass';
+  });
+  const [glassBlur, setGlassBlur] = useState<number>(() => {
+    if (typeof window === 'undefined') return 14;
+    if (localStorage.getItem('kl_glass_v2') !== '1') return 14;
+    const raw = Number(localStorage.getItem('kl_glass_blur'));
+    return Number.isFinite(raw) && raw >= 2 && raw <= 48 ? raw : 14;
+  });
+  const [glassSaturation, setGlassSaturation] = useState<number>(() => {
+    if (typeof window === 'undefined') return 205;
+    if (localStorage.getItem('kl_glass_v2') !== '1') return 205;
+    const raw = Number(localStorage.getItem('kl_glass_sat'));
+    return Number.isFinite(raw) && raw >= 100 && raw <= 260 ? raw : 205;
   });
   const [lang, setLang] = useState<AppLanguage>(() => {
     if (typeof window === 'undefined') return 'en';
@@ -197,6 +213,7 @@ export default function App() {
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [voiceRecordSeconds, setVoiceRecordSeconds] = useState(0);
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceWaveform, setVoiceWaveform] = useState<number[]>(() => Array(24).fill(0.18));
 
   // Statuses & Notification state
   const [statuses, setStatuses] = useState<UserStatus[]>([]);
@@ -216,6 +233,7 @@ export default function App() {
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectModalTab, setConnectModalTab] = useState<'gmail' | 'invite'>('gmail');
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileModalTab, setProfileModalTab] = useState<'profile' | 'settings' | 'account'>('profile');
   const [peerProfileModalOpen, setPeerProfileModalOpen] = useState(false);
   const [statusCreateOpen, setStatusCreateOpen] = useState(false);
   const [statusViewer, setStatusViewer] = useState<{
@@ -267,6 +285,10 @@ export default function App() {
   const voiceTimerRef = useRef<number | null>(null);
   const voiceStartMsRef = useRef<number>(0);
   const voiceIntentRef = useRef<'send' | 'cancel'>('cancel');
+  const voiceAudioCtxRef = useRef<AudioContext | null>(null);
+  const voiceAnalyserRef = useRef<AnalyserNode | null>(null);
+  const voiceAnimFrameRef = useRef<number | null>(null);
+  const voiceWaveLastTickRef = useRef<number>(0);
 
   useEffect(() => {
     initAudioUnlock();
@@ -360,17 +382,26 @@ export default function App() {
     };
   }, [notifOpen]);
 
-  // Apply dark mode class to <html>
+  // Apply Glass / Dark / Light classes and Glassmorphism intensity variables to <html>
   useEffect(() => {
     const root = document.documentElement;
-    if (darkMode) {
-      root.classList.add('dark');
-      localStorage.setItem('kl_theme', 'dark');
-    } else {
-      root.classList.remove('dark');
-      localStorage.setItem('kl_theme', 'light');
-    }
-  }, [darkMode]);
+    root.classList.toggle('dark', themeMode === 'dark');
+    root.classList.toggle('liquid-glass', themeMode === 'glass');
+    localStorage.setItem('kl_theme', themeMode);
+  }, [themeMode]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--glass-blur', `${glassBlur}px`);
+    root.style.setProperty('--glass-saturation', `${glassSaturation}%`);
+    localStorage.setItem('kl_glass_v2', '1');
+    localStorage.setItem('kl_glass_blur', String(glassBlur));
+    localStorage.setItem('kl_glass_sat', String(glassSaturation));
+  }, [glassBlur, glassSaturation]);
+
+  const cycleThemeMode = () => {
+    setThemeMode((prev) => (prev === 'glass' ? 'dark' : prev === 'dark' ? 'light' : 'glass'));
+  };
 
   useEffect(() => {
     localStorage.setItem('kl_lang', lang);
@@ -523,8 +554,15 @@ export default function App() {
         peerPhoto: nextCall.callerPhoto,
         initialSession: nextCall,
       });
+      if (document.hidden && getNotificationPermission() === 'granted') {
+        void showBackgroundNotification({
+          title: t(lang, nextCall.mode === 'video' ? 'incomingVideoCall' : 'incomingVoiceCall'),
+          body: `${nextCall.callerName}`,
+          chatId: nextCall.chatId,
+        });
+      }
     });
-  }, [publicProfile?.uid]);
+  }, [publicProfile?.uid, lang]);
 
   // Subscribe to user's chats + play incoming chime & show alert banner on new messages
   useEffect(() => {
@@ -920,15 +958,36 @@ export default function App() {
   };
 
   const cleanupVoiceStream = useCallback(() => {
+    if (voiceAnimFrameRef.current !== null) {
+      window.cancelAnimationFrame(voiceAnimFrameRef.current);
+      voiceAnimFrameRef.current = null;
+    }
     if (voiceTimerRef.current !== null) {
       window.clearInterval(voiceTimerRef.current);
       voiceTimerRef.current = null;
+    }
+    if (voiceAnalyserRef.current) {
+      try {
+        voiceAnalyserRef.current.disconnect();
+      } catch {
+        // Ignore disconnect failure
+      }
+      voiceAnalyserRef.current = null;
+    }
+    if (voiceAudioCtxRef.current) {
+      try {
+        void voiceAudioCtxRef.current.close();
+      } catch {
+        // Ignore close failure
+      }
+      voiceAudioCtxRef.current = null;
     }
     if (voiceStreamRef.current) {
       voiceStreamRef.current.getTracks().forEach((tr) => tr.stop());
       voiceStreamRef.current = null;
     }
     mediaRecorderRef.current = null;
+    setVoiceWaveform(Array(24).fill(0.18));
   }, []);
 
   useEffect(() => {
@@ -1122,6 +1181,49 @@ export default function App() {
       setVoiceRecordSeconds(0);
       setIsRecordingVoice(true);
 
+      // Attach read-only Web Audio AnalyserNode for real-time voice waveform visualization
+      try {
+        const AudioCtx =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const source = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 64;
+          analyser.smoothingTimeConstant = 0.72;
+          source.connect(analyser);
+          voiceAudioCtxRef.current = ctx;
+          voiceAnalyserRef.current = analyser;
+          if (ctx.state === 'suspended') {
+            void ctx.resume().catch(() => {});
+          }
+
+          const freqBuf = new Uint8Array(analyser.frequencyBinCount);
+          const barCount = 24;
+          const stepSample = (now: number) => {
+            if (!voiceAnalyserRef.current) return;
+            if (now - voiceWaveLastTickRef.current >= 34) {
+              voiceWaveLastTickRef.current = now;
+              voiceAnalyserRef.current.getByteFrequencyData(freqBuf);
+              const bars: number[] = [];
+              for (let i = 0; i < barCount; i++) {
+                // Mirror/distribute frequency bins cleanly across 24 bars
+                const binIdx = Math.min(freqBuf.length - 1, Math.floor((i / barCount) * (freqBuf.length * 0.75)));
+                const v = freqBuf[binIdx] / 255;
+                const floor = 0.14 + Math.sin(now / 180 + i * 0.45) * 0.05;
+                bars.push(Math.min(1, Math.max(floor, v * 1.15)));
+              }
+              setVoiceWaveform(bars);
+            }
+            voiceAnimFrameRef.current = window.requestAnimationFrame(stepSample);
+          };
+          voiceAnimFrameRef.current = window.requestAnimationFrame(stepSample);
+        }
+      } catch {
+        // Fallback gently if Web Audio API analyser is blocked
+      }
+
       recorder.ondataavailable = (ev) => {
         if (ev.data && ev.data.size > 0) {
           voiceChunksRef.current.push(ev.data);
@@ -1306,9 +1408,9 @@ export default function App() {
 
     return (
       <MotionConfig reducedMotion="user">
-      <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col">
+      <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 liquid-app-bg flex flex-col">
         {/* Clean 3-zone Top Bar */}
-        <header className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md flex items-center justify-between gap-4 sm:gap-8">
+        <header className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 liquid-surface liquid-divider backdrop-blur-md flex items-center justify-between gap-3 sm:gap-8">
           <KothaLinkLogo variant="compact" />
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
@@ -1319,20 +1421,56 @@ export default function App() {
           </nav>
 
           <div className="flex items-center gap-2 shrink-0">
+            <div className="hidden sm:grid grid-cols-3 gap-0.5 p-0.5 rounded-xl bg-slate-100/90 dark:bg-slate-900 liquid-control border border-slate-200 dark:border-slate-800">
+              {(
+                [
+                  { id: 'glass' as const, label: t(lang, 'glassMode'), Icon: Droplets },
+                  { id: 'dark' as const, label: t(lang, 'darkMode'), Icon: Moon },
+                  { id: 'light' as const, label: t(lang, 'lightMode'), Icon: Sun },
+                ] as const
+              ).map((opt) => {
+                const Icon = opt.Icon;
+                const active = themeMode === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setThemeMode(opt.id)}
+                    className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-all whitespace-nowrap ${
+                      active
+                        ? opt.id === 'dark'
+                          ? 'bg-slate-800 text-white shadow-xs'
+                          : 'bg-white text-slate-900 liquid-pill-active shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    <Icon className={`w-3.5 h-3.5 ${opt.id === 'glass' && active ? 'text-blue-600' : ''}`} />
+                    <span>{opt.label}</span>
+                  </button>
+                );
+              })}
+            </div>
             <button
               type="button"
-              onClick={() => setLang(lang === 'en' ? 'bn' : 'en')}
-              className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900 whitespace-nowrap"
+              onClick={cycleThemeMode}
+              aria-label="Switch theme"
+              className="sm:hidden min-h-[40px] px-2.5 flex items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 liquid-control text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900"
             >
-              {lang === 'en' ? 'বাংলা' : 'EN'}
+              {themeMode === 'glass' ? (
+                <Droplets className="w-4 h-4 text-blue-600" />
+              ) : themeMode === 'dark' ? (
+                <Moon className="w-4 h-4" />
+              ) : (
+                <Sun className="w-4 h-4" />
+              )}
+              <span>{t(lang, themeMode === 'glass' ? 'glassMode' : themeMode === 'dark' ? 'darkMode' : 'lightMode')}</span>
             </button>
             <button
               type="button"
-              onClick={() => setDarkMode(!darkMode)}
-              aria-label="Toggle theme"
-              className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900"
+              onClick={() => setLang(lang === 'en' ? 'bn' : 'en')}
+              className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-800 liquid-control text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900 whitespace-nowrap"
             >
-              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {lang === 'en' ? 'বাংলা' : 'EN'}
             </button>
           </div>
         </header>
@@ -1345,7 +1483,7 @@ export default function App() {
             className="max-w-5xl w-full grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch"
           >
             {/* Left Sign-in Column */}
-            <div className="lg:col-span-7 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-8 flex flex-col justify-between space-y-8">
+            <div className="lg:col-span-7 bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-8 flex flex-col justify-between space-y-8">
               <div className="space-y-5">
                 <KothaLinkLogo variant="hero" />
                 <div className="space-y-3 pt-1">
@@ -1412,7 +1550,7 @@ export default function App() {
                     unlockAudioNow();
                     setGuestBluetoothOpen(true);
                   }}
-                  className="w-full min-h-[44px] px-6 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                  className="w-full min-h-[44px] px-6 rounded-xl border border-slate-200 dark:border-slate-700 liquid-control hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-medium transition-colors flex items-center justify-center gap-2"
                 >
                   <Bluetooth className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                   {t(lang, 'tryBluetoothNow')}
@@ -1421,7 +1559,7 @@ export default function App() {
             </div>
 
             {/* Right Channel Overview Column */}
-            <div className="lg:col-span-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="lg:col-span-5 bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between divide-y divide-slate-100 dark:divide-slate-800">
               <div className="pb-5 flex items-start gap-4">
                 <div className="w-10 h-10 rounded-xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
                   <Mail className="w-5 h-5" />
@@ -1478,7 +1616,7 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion="user">
-    <div className="relative h-[100dvh] w-full overflow-hidden flex bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+    <div className="relative h-[100dvh] w-full overflow-hidden flex bg-slate-50 dark:bg-slate-950 liquid-app-bg text-slate-900 dark:text-slate-100">
       {/* Floating Incoming Message Notification Banner (plays with tone) */}
       <AnimatePresence>
         {incomingBanner && (
@@ -1490,7 +1628,7 @@ export default function App() {
             transition={{ type: 'spring', stiffness: 420, damping: 28 }}
             className="fixed top-3 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-sm"
           >
-            <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-blue-200 dark:border-blue-800 rounded-2xl shadow-lg p-3 flex items-center gap-3">
+            <div className="bg-white/95 dark:bg-slate-900/95 liquid-modal backdrop-blur-md border border-blue-200 dark:border-blue-800 rounded-2xl shadow-lg p-3 flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => {
@@ -1531,10 +1669,10 @@ export default function App() {
       <aside
         className={`${
           isMobileDetailActive ? 'hidden md:flex' : 'flex'
-        } w-full md:w-[340px] lg:w-[360px] shrink-0 flex-col border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 h-full`}
+        } w-full md:w-[340px] lg:w-[360px] shrink-0 flex-col border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 liquid-surface liquid-divider h-full`}
       >
         {/* Sidebar Header */}
-        <div className="px-3 sm:px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+        <div className="px-3 sm:px-4 py-3 border-b border-slate-200 dark:border-slate-800 liquid-divider flex items-center justify-between gap-2 shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -1589,7 +1727,7 @@ export default function App() {
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: 4, scale: 0.97 }}
                     transition={{ duration: 0.15 }}
-                    className="absolute right-0 mt-2 w-[290px] sm:w-[320px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl z-40 overflow-hidden"
+                    className="fixed top-[60px] left-3 right-3 sm:left-4 sm:right-auto sm:w-[340px] max-w-[calc(100vw-24px)] bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden"
                   >
                     <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
@@ -1660,7 +1798,7 @@ export default function App() {
                       )}
                     </div>
 
-                    <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                    <div className="p-3 bg-slate-50 dark:bg-slate-950/60 liquid-panel liquid-divider border-t border-slate-100 dark:border-slate-800 space-y-2">
                       <div className="flex items-center justify-between gap-2 text-xs">
                         <span className="text-slate-600 dark:text-slate-300 font-medium">
                           {t(lang, 'soundAlertsLabel')}
@@ -1706,7 +1844,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleTestAlert}
-                        className="w-full min-h-[34px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 transition-colors"
+                        className="w-full min-h-[34px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 liquid-control hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 transition-colors"
                       >
                         <BellRing className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
                         <span>{t(lang, 'testAlertBtn')}</span>
@@ -1734,16 +1872,29 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setDarkMode(!darkMode)}
-              aria-label="Toggle theme"
-              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors"
+              onClick={cycleThemeMode}
+              title={`${t(lang, 'themeLabel')}: ${t(lang, themeMode === 'glass' ? 'glassMode' : themeMode === 'dark' ? 'darkMode' : 'lightMode')}`}
+              aria-label="Switch theme"
+              className="min-h-[38px] px-2 flex items-center justify-center gap-1 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors shrink-0"
             >
-              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {themeMode === 'glass' ? (
+                <Droplets className="w-4 h-4 text-blue-600 shrink-0" />
+              ) : themeMode === 'dark' ? (
+                <Moon className="w-4 h-4 shrink-0" />
+              ) : (
+                <Sun className="w-4 h-4 text-amber-500 shrink-0" />
+              )}
+              <span className="hidden sm:inline">
+                {t(lang, themeMode === 'glass' ? 'glassMode' : themeMode === 'dark' ? 'darkMode' : 'lightMode')}
+              </span>
             </button>
             <button
               type="button"
-              onClick={() => setProfileModalOpen(true)}
-              aria-label="Profile Settings"
+              onClick={() => {
+                setProfileModalTab('settings');
+                setProfileModalOpen(true);
+              }}
+              aria-label="Settings"
               className="md:hidden min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors"
             >
               <Settings className="w-4 h-4" />
@@ -1752,19 +1903,19 @@ export default function App() {
         </div>
 
         {/* Search & Channel Filter */}
-        <div className="p-3 space-y-2.5 border-b border-slate-100 dark:border-slate-900 shrink-0">
+        <div className="p-3 space-y-2.5 border-b border-slate-100 dark:border-slate-900 liquid-divider shrink-0">
           <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={t(lang, 'searchPlaceholder')}
-              className="w-full min-h-[40px] pl-9 pr-3 rounded-xl bg-slate-100 dark:bg-slate-900 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              className="w-full min-h-[40px] pl-9 pr-3 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-500 dark:placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl">
+          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent rounded-xl">
             {(
               [
                 { id: 'all', label: t(lang, 'allChats') },
@@ -1778,7 +1929,7 @@ export default function App() {
                 onClick={() => setFilterTab(tab.id)}
                 className={`py-1.5 px-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap truncate ${
                   filterTab === tab.id
-                    ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                    ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
               >
@@ -1789,7 +1940,7 @@ export default function App() {
         </div>
 
         {/* Cool Top Quick-Access Strip for BT / QR & Gemini AI */}
-        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-900 grid grid-cols-2 gap-2 shrink-0 bg-slate-50/70 dark:bg-slate-900/35">
+        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-900 liquid-panel liquid-divider grid grid-cols-2 gap-2 shrink-0 bg-slate-50/70 dark:bg-slate-900/35">
           <button
             type="button"
             onClick={() => {
@@ -1801,7 +1952,7 @@ export default function App() {
             className={`group flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left transition-all active:scale-[0.98] ${
               workspaceView === 'bluetooth'
                 ? 'bg-blue-600 border-blue-600 text-white shadow-sm shadow-blue-600/20'
-                : 'bg-gradient-to-br from-blue-50/95 to-indigo-50/85 dark:from-blue-950/45 dark:to-indigo-950/35 border-blue-200/80 dark:border-blue-800/60 text-slate-900 dark:text-white hover:border-blue-400'
+                : 'bg-gradient-to-br from-blue-50/95 to-indigo-50/85 dark:from-blue-950/45 dark:to-indigo-950/35 liquid-control border-blue-200/80 dark:border-blue-800/60 text-slate-900 dark:text-white hover:border-blue-400'
             }`}
           >
             <span
@@ -1819,7 +1970,7 @@ export default function App() {
                 className={`block text-[10px] leading-tight truncate mt-0.5 ${
                   workspaceView === 'bluetooth'
                     ? 'text-blue-100'
-                    : 'text-slate-500 dark:text-slate-400'
+                    : 'text-slate-600 dark:text-slate-400'
                 }`}
               >
                 {lang === 'bn' ? 'অফলাইন ও স্ক্যান' : 'Nearby & Scan'}
@@ -1837,14 +1988,14 @@ export default function App() {
             className={`group flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left transition-all active:scale-[0.98] ${
               workspaceView === 'gemini'
                 ? 'bg-gradient-to-r from-indigo-600 to-violet-600 border-indigo-600 text-white shadow-sm shadow-indigo-600/20'
-                : 'bg-gradient-to-br from-violet-50/95 to-sky-50/85 dark:from-violet-950/45 dark:to-sky-950/35 border-violet-200/80 dark:border-violet-800/60 text-slate-900 dark:text-white hover:border-violet-400'
+                : 'bg-gradient-to-br from-violet-50/95 to-sky-50/85 dark:from-violet-950/45 dark:to-sky-950/35 liquid-control border-violet-200/80 dark:border-violet-800/60 text-slate-900 dark:text-white hover:border-violet-400'
             }`}
           >
             <span
               className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 ${
                 workspaceView === 'gemini'
                   ? 'bg-white/20'
-                  : 'bg-white dark:bg-slate-900 border border-violet-100 dark:border-violet-800/50 shadow-xs'
+                  : 'bg-white dark:bg-slate-900 liquid-pill-active border border-violet-100 dark:border-violet-800/50 shadow-xs'
               }`}
             >
               <GeminiLogo variant="icon" size={18} />
@@ -1857,7 +2008,7 @@ export default function App() {
                 className={`block text-[10px] leading-tight truncate mt-0.5 ${
                   workspaceView === 'gemini'
                     ? 'text-indigo-100'
-                    : 'text-slate-500 dark:text-slate-400'
+                    : 'text-slate-600 dark:text-slate-400'
                 }`}
               >
                 {lang === 'bn' ? 'স্মার্ট সহায়ক' : 'Smart Chat'}
@@ -1878,7 +2029,7 @@ export default function App() {
           }
 
           return (
-            <div className="px-3 py-2.5 border-b border-slate-100 dark:border-slate-900 flex items-center gap-3 overflow-x-auto shrink-0">
+            <div className="px-3 py-2.5 border-b border-slate-100 dark:border-slate-900 liquid-divider flex items-center gap-3 overflow-x-auto shrink-0">
               {/* My Status */}
               <div className="flex flex-col items-center gap-1 shrink-0">
                 <div className="relative">
@@ -1895,7 +2046,7 @@ export default function App() {
                         setStatusCreateOpen(true);
                       }
                     }}
-                    className={`w-12 h-12 rounded-full p-0.5 flex items-center justify-center transition-transform active:scale-95 ${
+                    className={`relative overflow-hidden w-12 h-12 rounded-full p-0.5 flex items-center justify-center transition-transform active:scale-95 ${
                       myStatuses.length > 0
                         ? 'bg-gradient-to-tr from-blue-600 to-emerald-500'
                         : 'border-2 border-dashed border-slate-300 dark:border-slate-700'
@@ -1907,13 +2058,17 @@ export default function App() {
                         src={publicProfile.photoUrl}
                         alt={publicProfile.displayName}
                         referrerPolicy="no-referrer"
-                        className="w-full h-full rounded-full object-cover border-2 border-white dark:border-slate-950"
+                        className="w-full h-full rounded-full object-cover border border-white/75 dark:border-slate-800/80 ring-1 ring-slate-900/5"
                       />
                     ) : (
-                      <div className="w-full h-full rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-sm border-2 border-white dark:border-slate-950">
+                      <div className="w-full h-full rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-sm border border-white/75 dark:border-slate-800/80">
                         {publicProfile.displayName.slice(0, 1).toUpperCase()}
                       </div>
                     )}
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-0.5 rounded-full bg-gradient-to-b from-white/35 via-white/5 to-transparent ring-1 ring-inset ring-white/60 shadow-[inset_0_1.5px_3px_rgba(255,255,255,0.75)]"
+                    />
                   </button>
                   <button
                     type="button"
@@ -2040,8 +2195,8 @@ export default function App() {
                   onClick={() => openChat(chat.id)}
                   className={`w-full min-h-[64px] px-3 py-2.5 rounded-xl text-left flex items-center gap-3 transition-colors ${
                     isSelected
-                      ? 'bg-slate-100 dark:bg-slate-900'
-                      : 'hover:bg-slate-50 dark:hover:bg-slate-900/50'
+                      ? 'bg-slate-100 dark:bg-slate-900 liquid-row-active'
+                      : 'hover:bg-slate-50 dark:hover:bg-slate-900/50 liquid-row'
                   }`}
                 >
                   <UserAvatar
@@ -2103,11 +2258,14 @@ export default function App() {
         </div>
 
         {/* Bottom Profile Bar (Desktop) */}
-        <div className="hidden md:flex p-3 border-t border-slate-200 dark:border-slate-800 items-center justify-between gap-3 shrink-0">
+        <div className="hidden md:flex p-3 border-t border-slate-200 dark:border-slate-800 liquid-divider items-center justify-between gap-3 shrink-0">
           <button
             type="button"
-            onClick={() => setProfileModalOpen(true)}
-            className="flex-1 min-w-0 flex items-center gap-2.5 p-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-900 text-left transition-colors"
+            onClick={() => {
+              setProfileModalTab('profile');
+              setProfileModalOpen(true);
+            }}
+            className="flex-1 min-w-0 flex items-center gap-2.5 p-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-900 liquid-row text-left transition-colors"
           >
             <UserAvatar
               name={publicProfile.displayName}
@@ -2129,8 +2287,11 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setProfileModalOpen(true)}
-            aria-label="Profile Settings"
+            onClick={() => {
+              setProfileModalTab('settings');
+              setProfileModalOpen(true);
+            }}
+            aria-label="Settings"
             className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-900 shrink-0"
           >
             <Settings className="w-4 h-4" />
@@ -2138,7 +2299,7 @@ export default function App() {
         </div>
 
         {/* Bottom Action Dock: Keep Chats & New Chat on Left Side (Right stays clear of Netlify badge) */}
-        <div className="shrink-0 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800">
+        <div className="shrink-0 bg-white/95 dark:bg-slate-950/95 liquid-surface liquid-divider backdrop-blur-md border-t border-slate-200 dark:border-slate-800">
           <nav className="h-16 w-[52%] md:w-full grid grid-cols-2 items-center">
             <button
               type="button"
@@ -2172,7 +2333,7 @@ export default function App() {
       <main
         className={`${
           isMobileDetailActive ? 'flex' : 'hidden md:flex'
-        } flex-1 flex-col h-full bg-slate-50 dark:bg-slate-950 overflow-hidden`}
+        } flex-1 flex-col h-full bg-slate-50 dark:bg-slate-950 liquid-app-bg overflow-hidden`}
       >
         <AnimatePresence mode="wait">
         {workspaceView === 'bluetooth' ? (
@@ -2230,7 +2391,7 @@ export default function App() {
               const file = e.dataTransfer.files?.[0];
               if (file) void handleAttachmentPicked(file);
             }}
-            className="relative flex-1 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden"
+            className="relative flex-1 flex flex-col h-full bg-white dark:bg-slate-950 liquid-app-bg overflow-hidden"
           >
             {/* Drag & Drop File Overlay */}
             <AnimatePresence>
@@ -2257,7 +2418,7 @@ export default function App() {
               const activePresenceText = formatPresenceLabel(activePeer, lang, nowTick);
               const canCallPeer = activeChat.participantIds.length >= 2;
               return (
-                <header className="px-3 sm:px-6 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+                <header className="px-3 sm:px-6 py-3 border-b border-slate-200 dark:border-slate-800 liquid-surface flex items-center justify-between gap-2 shrink-0">
                   <div className="flex items-center gap-2 min-w-0 flex-1">
                     <button
                       type="button"
@@ -2452,7 +2613,7 @@ export default function App() {
             )}
 
             {/* Message Feed */}
-            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 bg-slate-50/50 dark:bg-slate-950">
+            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 bg-slate-50/50 dark:bg-slate-950 liquid-panel">
               {renderedMessages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-4">
                   <p className="text-sm text-slate-500 dark:text-slate-400">
@@ -2590,7 +2751,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
                   transition={{ duration: 0.15 }}
-                  className="px-4 sm:px-6 py-2.5 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3"
+                  className="px-4 sm:px-6 py-2.5 bg-slate-50 dark:bg-slate-900 liquid-surface liquid-divider border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3"
                 >
                   {uploadProgress !== null ? (
                     <div className="flex-1 flex items-center gap-3">
@@ -2659,7 +2820,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
                   transition={{ duration: 0.14 }}
-                  className="px-4 sm:px-6 py-2 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center gap-2 overflow-x-auto"
+                  className="px-4 sm:px-6 py-2 bg-white dark:bg-slate-900 liquid-surface liquid-divider border-t border-slate-200 dark:border-slate-800 flex items-center gap-2 overflow-x-auto"
                 >
                   {QUICK_EMOJIS.map((em) => (
                     <button
@@ -2712,9 +2873,9 @@ export default function App() {
               }}
             />
 
-            {/* Organized 2-Row Composer Dock: Send Shifted Leftward + Voice Message Recorder */}
+            {/* Organized 2-Row Composer Dock: Send Shifted Leftward + Live Voice Waveform Recorder */}
             <div
-              className={`border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shrink-0 chat-composer-container${
+              className={`border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 liquid-surface liquid-divider shrink-0 chat-composer-container${
                 hasNetlifyBadge ? ' has-netlify-badge' : ''
               }`}
             >
@@ -2722,22 +2883,32 @@ export default function App() {
                 onSubmit={(e) => handleSendMessage(e)}
                 className="p-2.5 sm:p-4 space-y-2"
               >
-                {/* Row 1: Input / Live Voice Recording + Send Button (shifted left away from bottom-right badge) */}
+                {/* Row 1: Input / Live Voice Waveform Graph + Send Button (shifted left away from bottom-right badge) */}
                 {isRecordingVoice ? (
                   <div
-                    className={`flex items-center gap-2 p-2 rounded-2xl bg-red-50 dark:bg-red-950/35 border border-red-200 dark:border-red-900/70 ${
+                    className={`flex items-center gap-2 p-2 rounded-2xl bg-red-50/90 dark:bg-red-950/35 border border-red-200 dark:border-red-900/70 backdrop-blur-md ${
                       hasNetlifyBadge ? 'mr-[128px] sm:mr-[180px]' : 'mr-2 sm:mr-4'
                     }`}
                   >
                     <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0 ml-1" />
-                    <span className="text-xs font-semibold text-red-700 dark:text-red-300 truncate">
-                      {t(lang, 'recordingVoice')}
-                    </span>
                     <span className="text-xs font-mono-tabular font-bold text-red-600 dark:text-red-400 shrink-0">
                       {Math.floor(voiceRecordSeconds / 60)}:
                       {(voiceRecordSeconds % 60).toString().padStart(2, '0')}
                     </span>
-                    <div className="flex-1 min-w-0" />
+                    {/* Live Real-Time AnalyserNode Frequency Waveform Graph */}
+                    <div
+                      role="img"
+                      aria-label={t(lang, 'liveWaveLabel')}
+                      className="flex-1 min-w-[60px] h-8 px-1.5 rounded-xl bg-white/75 dark:bg-slate-900/60 border border-red-200/70 dark:border-red-900/40 flex items-center justify-between gap-[2px] overflow-hidden"
+                    >
+                      {voiceWaveform.map((level, idx) => (
+                        <span
+                          key={idx}
+                          className="flex-1 max-w-[4px] min-w-[2px] rounded-full bg-gradient-to-t from-rose-500 via-red-500 to-amber-400 transition-[height] duration-75 ease-out"
+                          style={{ height: `${Math.max(16, Math.round(level * 100))}%` }}
+                        />
+                      ))}
+                    </div>
                     <button
                       type="button"
                       onClick={() => stopVoiceRecording('cancel')}
@@ -2752,15 +2923,15 @@ export default function App() {
                       onClick={() => stopVoiceRecording('send')}
                       disabled={voiceBusy}
                       aria-label={t(lang, 'sendVoice')}
-                      className="min-h-[36px] px-3 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                      className="min-h-[36px] px-3 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 shadow-sm shadow-red-600/25"
                     >
                       <Square className="w-3 h-3 fill-current" />
-                      <span>{t(lang, 'sendVoice')}</span>
+                      <span className="hidden xs:inline sm:inline">{t(lang, 'sendVoice')}</span>
                     </button>
                   </div>
                 ) : (
                   <div
-                    className={`flex items-center gap-1.5 sm:gap-2 p-1.5 rounded-2xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 focus-within:border-blue-500 dark:focus-within:border-blue-500 transition-colors ${
+                    className={`flex items-center gap-1.5 sm:gap-2 p-1.5 rounded-2xl bg-slate-100 dark:bg-slate-900 liquid-control border border-slate-200 dark:border-slate-800 focus-within:border-blue-500 dark:focus-within:border-blue-500 transition-colors ${
                       hasNetlifyBadge ? 'mr-[128px] sm:mr-[180px]' : 'mr-2 sm:mr-6'
                     }`}
                   >
@@ -2861,7 +3032,7 @@ export default function App() {
                     onClick={() => imageInputRef.current?.click()}
                     title={t(lang, 'uploadImage')}
                     aria-label={t(lang, 'uploadImage')}
-                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
                   >
                     <ImagePlus className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
                     <span>{t(lang, 'photoBtn')}</span>
@@ -2872,7 +3043,7 @@ export default function App() {
                     onClick={() => fileInputRef.current?.click()}
                     title={t(lang, 'uploadFile')}
                     aria-label={t(lang, 'uploadFile')}
-                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1.5 text-xs font-medium transition-colors whitespace-nowrap"
                   >
                     <Paperclip className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
                     <span>{t(lang, 'fileBtn')}</span>
@@ -2884,8 +3055,8 @@ export default function App() {
                     aria-label="Toggle emojis"
                     className={`min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl transition-colors ${
                       showEmojiPicker
-                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
-                        : 'bg-slate-100 dark:bg-slate-900 text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800'
+                        ? 'bg-blue-50 dark:bg-blue-950/50 liquid-pill-active text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
+                        : 'bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800'
                     }`}
                   >
                     <Smile className="w-4 h-4" />
@@ -2933,7 +3104,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
                   transition={{ duration: 0.22, delay: 0.03, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  className="bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center">
@@ -2965,7 +3136,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
                   transition={{ duration: 0.22, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  className="bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-emerald-600/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
@@ -2997,7 +3168,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
                   transition={{ duration: 0.22, delay: 0.13, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  className="bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center justify-center">
@@ -3017,7 +3188,7 @@ export default function App() {
                       setBtInitialMode('bluetooth');
                       setWorkspaceView('bluetooth');
                     }}
-                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 liquid-control hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap"
                   >
                     {t(lang, 'cardBtAction')}
                   </motion.button>
@@ -3025,7 +3196,7 @@ export default function App() {
               </div>
 
               {/* Join by Invite Code & Gemini AI Quick Bars */}
-              <div className="pt-4 flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 dark:border-slate-800">
+              <div className="pt-4 flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 dark:border-slate-800 liquid-divider">
                 <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                   <KeyRound className="w-4 h-4" />
                   <span>Got an invite code from a friend?</span>
@@ -3044,7 +3215,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void sharePublicApp()}
-                    className="min-h-[38px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium flex items-center gap-2 whitespace-nowrap transition-colors"
+                    className="min-h-[38px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 liquid-control hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium flex items-center gap-2 whitespace-nowrap transition-colors"
                   >
                     {copiedAppLink ? (
                       <>
@@ -3122,8 +3293,11 @@ export default function App() {
           >
             <ProfileModal
               isOpen={profileModalOpen}
+              initialTab={profileModalTab}
               lang={lang}
-              darkMode={darkMode}
+              themeMode={themeMode}
+              glassBlur={glassBlur}
+              glassSaturation={glassSaturation}
               soundOn={soundOn}
               notifPermission={notifPermission}
               enterToSend={enterToSend}
@@ -3151,7 +3325,13 @@ export default function App() {
                 );
                 setLang(updates.language);
               }}
-              onToggleTheme={(dark) => setDarkMode(dark)}
+              onChangeTheme={(mode) => setThemeMode(mode)}
+              onChangeGlassBlur={(blur) => setGlassBlur(blur)}
+              onChangeGlassSaturation={(sat) => setGlassSaturation(sat)}
+              onResetGlass={() => {
+                setGlassBlur(14);
+                setGlassSaturation(205);
+              }}
               onToggleSound={toggleSound}
               onRequestBgNotifications={() => void handleRequestBgNotifications()}
               onToggleEnterToSend={toggleEnterToSend}

@@ -62,6 +62,7 @@ export type ChatChannel = 'gmail' | 'phone' | 'nearby';
 export type MessageTransport = 'gmail' | 'phone' | 'internet' | 'nearby' | 'bluetooth';
 export type AttachmentType = 'none' | 'image' | 'file';
 export type AppLanguage = 'en' | 'bn';
+export type AppTheme = 'glass' | 'dark' | 'light';
 export type StatusBgGradient = 'blue' | 'emerald' | 'amber' | 'rose' | 'slate';
 
 export const STATUS_REACTION_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮', '😢'] as const;

@@ -276,16 +276,16 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
         ];
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden">
+    <div className="flex-1 flex flex-col h-full bg-white dark:bg-slate-950 liquid-app-bg overflow-hidden">
       {/* Header with Custom Animated Gemini Logo */}
-      <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
+      <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 liquid-surface liquid-divider flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
           {onClose && (
             <button
               type="button"
               onClick={onClose}
               aria-label={t(lang, 'backBtn')}
-              className="min-h-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold shrink-0 transition-colors"
+              className="min-h-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold shrink-0 transition-colors"
             >
               <ArrowLeft className="w-4 h-4 shrink-0" />
               <span className="hidden sm:inline">{t(lang, 'backBtn')}</span>
@@ -315,7 +315,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
             aria-label="Chatbot Role"
             value={rolePreset}
             onChange={(e) => setRolePreset(e.target.value as RolePreset)}
-            className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-600"
+            className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-600"
           >
             <option value="assistant">General Assistant</option>
             <option value="translator">Bangla / English Helper</option>
@@ -326,7 +326,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
             aria-label="Gemini Model"
             value={modelChoice}
             onChange={(e) => setModelChoice(e.target.value as ModelChoice)}
-            className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-600"
+            className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-600"
           >
             <option value="gemini-3.1-flash-lite">Ultra Fast (Flash Lite)</option>
             <option value="gemini-4-hydrogen">Balanced (Hydrogen)</option>
@@ -336,7 +336,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
             type="button"
             onClick={resetChat}
             title="Reset conversation"
-            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900"
+            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 liquid-control text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900"
           >
             <RotateCcw className="w-4 h-4" />
           </button>
@@ -355,7 +355,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
       </div>
 
       {/* Scrollable Thread */}
-      <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-4 bg-slate-50/50 dark:bg-slate-950">
+      <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-4 bg-slate-50/50 dark:bg-slate-950 liquid-panel">
         {turns.map((turn) => {
           const aggregated: AggregatedReaction[] = Object.entries(turn.reactions || {}).map(
             ([emoji, count]) => ({

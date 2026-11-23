@@ -324,9 +324,9 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden">
+    <div className="flex-1 flex flex-col h-full bg-white dark:bg-slate-950 liquid-app-bg overflow-hidden">
       {/* Header with Top-Left Back Button */}
-      <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
+      <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 liquid-surface liquid-divider flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
@@ -345,7 +345,7 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
               onClose?.();
             }}
             aria-label={t(lang, 'backBtn')}
-            className="min-h-[40px] px-3 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-semibold shrink-0 transition-colors"
+            className="min-h-[40px] px-3 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-semibold shrink-0 transition-colors"
           >
             <ArrowLeft className="w-4 h-4 shrink-0" />
             <span>{t(lang, 'backBtn')}</span>
@@ -360,13 +360,13 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 liquid-control rounded-xl border border-slate-200 dark:border-slate-800">
             <button
               type="button"
               onClick={() => setSubMode('bluetooth')}
               className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
                 subMode === 'bluetooth'
-                  ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                  ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
               }`}
             >
@@ -378,7 +378,7 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
               onClick={() => setSubMode('nearby')}
               className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
                 subMode === 'nearby'
-                  ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                  ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
               }`}
             >
@@ -404,7 +404,7 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
         <div className="flex-1 flex flex-col overflow-hidden">
           {!bleSession ? (
             <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center">
-              <div className="max-w-lg w-full border border-slate-200 dark:border-slate-800 rounded-2xl p-6 bg-slate-50/70 dark:bg-slate-900/50 space-y-5">
+              <div className="max-w-lg w-full border border-slate-200 dark:border-slate-800 rounded-2xl p-6 bg-slate-50/70 dark:bg-slate-900/50 liquid-card space-y-5">
                 <div className="w-12 h-12 rounded-2xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center">
                   <Bluetooth className="w-6 h-6" />
                 </div>
