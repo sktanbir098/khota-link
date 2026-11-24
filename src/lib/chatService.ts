@@ -7,6 +7,7 @@ import {
   DocumentReference,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -98,7 +99,7 @@ export async function ensureUserProfile(user: User): Promise<{
 }> {
   const userRef = doc(db, 'users', user.uid);
   const privateRef = doc(db, 'users', user.uid, 'private', 'info');
-  await user.getIdTokenResult(true).catch(() => null);
+  await user.getIdTokenResult(false).catch(() => null);
 
   const displayName = sanitizeStr(
     user.displayName || user.email?.split('@')[0] || 'KothaLink User',
@@ -106,37 +107,42 @@ export async function ensureUserProfile(user: User): Promise<{
   );
   const photoUrl = sanitizeStr(user.photoURL || '', LIMITS.PHOTO_URL_MAX);
   const email = sanitizeStr(normalizeEmail(user.email || ''), LIMITS.EMAIL_MAX);
+  const maskedEmail = email ? sanitizeStr(maskEmail(email), LIMITS.EMAIL_MAX) : '';
 
   let existingPublic: UserPublicProfile | null = null;
   let existingPrivate: UserPrivateInfo | null = null;
 
-  try {
-    const pubSnap = await getDoc(userRef);
-    if (pubSnap.exists()) {
-      existingPublic = pubSnap.data() as UserPublicProfile;
-    }
-  } catch (err) {
-    handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
+  const [pubResult, privResult] = await Promise.allSettled([
+    getDoc(userRef),
+    getDoc(privateRef),
+  ]);
+
+  if (pubResult.status === 'rejected') {
+    handleFirestoreError(pubResult.reason, OperationType.GET, `users/${user.uid}`);
+  }
+  if (pubResult.value.exists()) {
+    existingPublic = pubResult.value.data() as UserPublicProfile;
   }
 
-  try {
-    const privSnap = await getDoc(privateRef);
-    if (privSnap.exists()) {
-      existingPrivate = privSnap.data() as UserPrivateInfo;
-    }
-  } catch (err) {
-    handleFirestoreError(err, OperationType.GET, `users/${user.uid}/private/info`);
+  if (privResult.status === 'rejected') {
+    handleFirestoreError(privResult.reason, OperationType.GET, `users/${user.uid}/private/info`);
+  }
+  if (privResult.value.exists()) {
+    existingPrivate = privResult.value.data() as UserPrivateInfo;
   }
 
   const batch = writeBatch(db);
   const safeDisplayName = displayName || 'KothaLink User';
+  let needsFreshRead = false;
 
   if (!existingPublic) {
+    needsFreshRead = true;
     batch.set(userRef, {
       uid: user.uid,
       displayName: safeDisplayName,
       photoUrl,
       bio: 'Available on KothaLink',
+      ...(maskedEmail ? { maskedEmail } : {}),
       hasPhone: false,
       showOnlineStatus: true,
       onlineStatus: 'online',
@@ -160,6 +166,9 @@ export async function ensureUserProfile(user: User): Promise<{
     if (typeof existingPublic.bio !== 'string' || existingPublic.bio.length > LIMITS.BIO_MAX) {
       pubUpdates.bio = sanitizeStr(String(existingPublic.bio || 'Available on KothaLink'), LIMITS.BIO_MAX);
     }
+    if (maskedEmail && existingPublic.maskedEmail !== maskedEmail) {
+      pubUpdates.maskedEmail = maskedEmail;
+    }
     if (typeof existingPublic.hasPhone !== 'boolean') {
       pubUpdates.hasPhone = false;
     }
@@ -167,9 +176,20 @@ export async function ensureUserProfile(user: User): Promise<{
       pubUpdates.showOnlineStatus = true;
     }
     batch.update(userRef, pubUpdates);
+    existingPublic = {
+      ...existingPublic,
+      ...(pubUpdates.displayName ? { displayName: String(pubUpdates.displayName) } : {}),
+      ...(pubUpdates.photoUrl !== undefined ? { photoUrl: String(pubUpdates.photoUrl) } : {}),
+      ...(pubUpdates.bio !== undefined ? { bio: String(pubUpdates.bio) } : {}),
+      ...(pubUpdates.maskedEmail ? { maskedEmail: String(pubUpdates.maskedEmail) } : {}),
+      ...(typeof pubUpdates.hasPhone === 'boolean' ? { hasPhone: pubUpdates.hasPhone } : {}),
+      ...(typeof pubUpdates.showOnlineStatus === 'boolean' ? { showOnlineStatus: pubUpdates.showOnlineStatus } : {}),
+      onlineStatus: 'online',
+    };
   }
 
   if (!existingPrivate) {
+    needsFreshRead = true;
     batch.set(privateRef, {
       uid: user.uid,
       email,
@@ -193,12 +213,19 @@ export async function ensureUserProfile(user: User): Promise<{
     if (Object.keys(privUpdates).length > 0) {
       privUpdates.updatedAt = serverTimestamp();
       batch.update(privateRef, privUpdates);
+      existingPrivate = {
+        ...existingPrivate,
+        ...(privUpdates.email ? { email: String(privUpdates.email) } : {}),
+        ...(privUpdates.phoneNumber !== undefined ? { phoneNumber: String(privUpdates.phoneNumber) } : {}),
+        ...(privUpdates.language ? { language: privUpdates.language as AppLanguage } : {}),
+      };
     }
   }
 
   try {
     await batch.commit();
   } catch (err) {
+    needsFreshRead = true;
     // If an existing user document has legacy/extra fields or missing createdAt, repair it cleanly
     if (existingPublic || existingPrivate) {
       try {
@@ -209,6 +236,7 @@ export async function ensureUserProfile(user: User): Promise<{
             displayName: sanitizeStr(existingPublic.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User',
             photoUrl: sanitizeStr(existingPublic.photoUrl || photoUrl, LIMITS.PHOTO_URL_MAX),
             bio: sanitizeStr(existingPublic.bio || 'Available on KothaLink', LIMITS.BIO_MAX),
+            ...(maskedEmail ? { maskedEmail } : {}),
             hasPhone: false,
             showOnlineStatus: typeof existingPublic.showOnlineStatus === 'boolean' ? existingPublic.showOnlineStatus : true,
             onlineStatus: 'online',
@@ -235,35 +263,43 @@ export async function ensureUserProfile(user: User): Promise<{
     }
   }
 
-  // Register SHA-256 email directory entry in a non-blocking write so a stale directory doc never blocks sign-in
+  // Register/sync SHA-256 email directory entry in background so sign-in/boot is instant
   if (email) {
-    try {
-      const emailHash = await sha256Hex(email);
-      const dirRef = doc(db, 'email_directory', emailHash);
-      const dirSnap = await getDoc(dirRef).catch(() => null);
-      const dirName = sanitizeStr(existingPublic?.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
-      const dirPhoto = sanitizeStr(existingPublic?.photoUrl || photoUrl, LIMITS.PHOTO_URL_MAX);
-
-      if (!dirSnap || !dirSnap.exists()) {
-        await setDoc(dirRef, {
-          uid: user.uid,
-          displayName: dirName,
-          photoUrl: dirPhoto,
-          updatedAt: serverTimestamp(),
-        });
-      } else if (dirSnap.data()?.uid === user.uid) {
-        const existingDir = dirSnap.data();
-        if (existingDir?.displayName !== dirName || existingDir?.photoUrl !== dirPhoto) {
-          await updateDoc(dirRef, {
+    const dirName = sanitizeStr(existingPublic?.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
+    const dirPhoto = sanitizeStr(existingPublic?.photoUrl || photoUrl, LIMITS.PHOTO_URL_MAX);
+    void (async () => {
+      try {
+        const emailHash = await sha256Hex(email);
+        const dirRef = doc(db, 'email_directory', emailHash);
+        const dirSnap = await getDoc(dirRef).catch(() => null);
+        if (!dirSnap || !dirSnap.exists()) {
+          await setDoc(dirRef, {
+            uid: user.uid,
             displayName: dirName,
             photoUrl: dirPhoto,
             updatedAt: serverTimestamp(),
           });
+        } else if (dirSnap.data()?.uid === user.uid) {
+          const existingDir = dirSnap.data();
+          if (existingDir?.displayName !== dirName || existingDir?.photoUrl !== dirPhoto) {
+            await updateDoc(dirRef, {
+              displayName: dirName,
+              photoUrl: dirPhoto,
+              updatedAt: serverTimestamp(),
+            });
+          }
         }
+      } catch {
+        // Non-fatal: user profile is already saved
       }
-    } catch {
-      // Non-fatal: user profile is already saved
-    }
+    })();
+  }
+
+  if (!needsFreshRead && existingPublic && existingPrivate) {
+    return {
+      publicProfile: existingPublic,
+      privateInfo: existingPrivate,
+    };
   }
 
   const [freshPub, freshPriv] = await Promise.all([
@@ -951,6 +987,141 @@ async function deleteDocRefsInBatches(refs: DocumentReference[]): Promise<void> 
   }
 }
 
+const deliveredStampInFlight = new Set<string>();
+const seenStampInFlight = new Set<string>();
+const lastDeliveredCheckAt = new Map<string, number>();
+
+export async function markChatMessagesDelivered(
+  chatId: string,
+  currentUid: string,
+  force = false
+): Promise<void> {
+  if (!chatId || !currentUid || !LIMITS.ID_PATTERN.test(chatId)) return;
+  const now = Date.now();
+  const prevCheck = lastDeliveredCheckAt.get(chatId) ?? 0;
+  if (!force && now - prevCheck < 4000) return;
+  lastDeliveredCheckAt.set(chatId, now);
+
+  try {
+    const q = query(
+      collection(db, 'chats', chatId, 'messages'),
+      orderBy('createdAt', 'desc'),
+      limit(30)
+    );
+    const snap = await getDocs(q);
+    const toUpdate = snap.docs.filter((d) => {
+      const data = d.data() as { senderId?: string; deliveredAt?: Timestamp | null };
+      const key = `${chatId}:${d.id}`;
+      return (
+        data.senderId &&
+        data.senderId !== currentUid &&
+        !data.deliveredAt &&
+        !deliveredStampInFlight.has(key)
+      );
+    });
+    if (toUpdate.length === 0) return;
+
+    toUpdate.forEach((d) => deliveredStampInFlight.add(`${chatId}:${d.id}`));
+    try {
+      const batch = writeBatch(db);
+      toUpdate.forEach((d) => {
+        batch.update(d.ref, { deliveredAt: serverTimestamp() });
+      });
+      await batch.commit();
+    } catch {
+      toUpdate.forEach((d) => deliveredStampInFlight.delete(`${chatId}:${d.id}`));
+    }
+  } catch {
+    // Best-effort delivery acknowledgement
+  }
+}
+
+export async function markChatMessagesSeen(
+  chatId: string,
+  currentUid: string,
+  messages: ChatMessage[]
+): Promise<void> {
+  if (!chatId || !currentUid || messages.length === 0) return;
+  const pending = messages.filter((m) => {
+    if (m.optimistic || m.senderId === currentUid) return false;
+    if (m.readAt && m.deliveredAt) return false;
+    const key = `${chatId}:${m.id}`;
+    return !seenStampInFlight.has(key);
+  });
+  if (pending.length === 0) return;
+
+  pending.forEach((m) => seenStampInFlight.add(`${chatId}:${m.id}`));
+  try {
+    for (let i = 0; i < pending.length; i += 200) {
+      const batch = writeBatch(db);
+      pending.slice(i, i + 200).forEach((m) => {
+        const updates: Record<string, unknown> = {};
+        if (!m.deliveredAt) updates.deliveredAt = serverTimestamp();
+        if (!m.readAt) updates.readAt = serverTimestamp();
+        batch.update(doc(db, 'chats', chatId, 'messages', m.id), updates);
+      });
+      await batch.commit();
+    }
+  } catch {
+    pending.forEach((m) => seenStampInFlight.delete(`${chatId}:${m.id}`));
+  }
+}
+
+function formatMessagePreviewForChat(msg?: ChatMessage | null): string {
+  if (!msg) return 'Message deleted';
+  if (msg.text?.trim()) return sanitizeStr(msg.text, LIMITS.LAST_MESSAGE_MAX);
+  if (msg.attachmentType === 'image') {
+    return sanitizeStr(`Photo: ${msg.attachmentName || 'image'}`, LIMITS.LAST_MESSAGE_MAX);
+  }
+  if (msg.attachmentMime?.startsWith('audio/')) {
+    return sanitizeStr(`🎤 ${msg.attachmentName || 'Voice'}`, LIMITS.LAST_MESSAGE_MAX);
+  }
+  if (msg.attachmentType === 'file') {
+    return sanitizeStr(`File: ${msg.attachmentName || 'file'}`, LIMITS.LAST_MESSAGE_MAX);
+  }
+  return 'Message deleted';
+}
+
+export async function deleteChatMessage(params: {
+  chat: ChatRoom;
+  message: ChatMessage;
+  previousMessage?: ChatMessage | null;
+  isLatest: boolean;
+  currentUid: string;
+}): Promise<void> {
+  const { chat, message, previousMessage, isLatest, currentUid } = params;
+  const path = `chats/${chat.id}/messages/${message.id}`;
+  try {
+    const refsToDelete: DocumentReference[] = [];
+    if (message.attachmentData && message.attachmentData.startsWith('chunked:')) {
+      const chunksSnap = await getDocs(
+        collection(db, 'chats', chat.id, 'messages', message.id, 'chunks')
+      );
+      chunksSnap.docs.forEach((c) => refsToDelete.push(c.ref));
+    }
+    const reactSnap = await getDocs(
+      query(collection(db, 'chats', chat.id, 'reactions'), where('messageId', '==', message.id))
+    );
+    reactSnap.docs.forEach((r) => refsToDelete.push(r.ref));
+    if (refsToDelete.length > 0) {
+      await deleteDocRefsInBatches(refsToDelete);
+    }
+
+    await deleteDoc(doc(db, 'chats', chat.id, 'messages', message.id));
+
+    if (isLatest) {
+      await updateDoc(doc(db, 'chats', chat.id), {
+        lastMessageText: formatMessagePreviewForChat(previousMessage),
+        lastMessageSenderId: currentUid,
+        lastMessageAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      }).catch(() => null);
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
+}
+
 export async function deleteChatRoom(params: {
   chat: ChatRoom;
   currentUid: string;
@@ -969,12 +1140,14 @@ export async function deleteChatRoom(params: {
       refsToDelete.push(msgDoc.ref);
     }
 
-    const [reactSnap, typingSnap] = await Promise.all([
+    const [reactSnap, typingSnap, emailSnap] = await Promise.all([
       getDocs(collection(db, 'chats', chatId, 'reactions')),
       getDocs(collection(db, 'chats', chatId, 'typing')),
+      getDocs(collection(db, 'chats', chatId, 'participant_emails')),
     ]);
     reactSnap.docs.forEach((r) => refsToDelete.push(r.ref));
     typingSnap.docs.forEach((t) => refsToDelete.push(t.ref));
+    emailSnap.docs.forEach((em) => refsToDelete.push(em.ref));
 
     await deleteDocRefsInBatches(refsToDelete);
 
@@ -1287,3 +1460,83 @@ export function subscribeStatusesForUids(
     unsubs.forEach((u) => u());
   };
 }
+
+const syncedParticipantEmailKeys = new Set<string>();
+
+export async function syncMyChatParticipantEmail(params: {
+  chatId: string;
+  uid: string;
+  email: string;
+}): Promise<void> {
+  const cleanEmail = sanitizeStr(normalizeEmail(params.email || ''), LIMITS.EMAIL_MAX);
+  if (!params.chatId || !params.uid || !cleanEmail || !cleanEmail.includes('@')) return;
+  const cacheKey = `${params.chatId}:${params.uid}:${cleanEmail}`;
+  if (syncedParticipantEmailKeys.has(cacheKey)) return;
+
+  try {
+    await setDoc(doc(db, 'chats', params.chatId, 'participant_emails', params.uid), {
+      uid: params.uid,
+      email: cleanEmail,
+      updatedAt: serverTimestamp(),
+    });
+    syncedParticipantEmailKeys.add(cacheKey);
+  } catch {
+    // Non-fatal if user email claim differs or offline
+  }
+}
+
+export function subscribeChatParticipantEmails(
+  chatId: string,
+  onEmails: (emailsByUid: Record<string, string>) => void
+): Unsubscribe {
+  if (!chatId || !LIMITS.ID_PATTERN.test(chatId)) {
+    onEmails({});
+    return () => {};
+  }
+  return onSnapshot(
+    collection(db, 'chats', chatId, 'participant_emails'),
+    (snap) => {
+      const map: Record<string, string> = {};
+      snap.docs.forEach((d) => {
+        const data = d.data() as { uid?: string; email?: string };
+        if (typeof data.uid === 'string' && typeof data.email === 'string' && data.email.includes('@')) {
+          map[data.uid] = data.email.trim().toLowerCase();
+        }
+      });
+      onEmails(map);
+    },
+    () => {
+      // Non-fatal
+    }
+  );
+}
+
+export async function fetchAllChatParticipantEmails(
+  chatIds: string[],
+  currentUid: string
+): Promise<Record<string, string>> {
+  const validIds = chatIds.filter((id) => Boolean(id) && LIMITS.ID_PATTERN.test(id));
+  if (validIds.length === 0 || !currentUid) return {};
+
+  const out: Record<string, string> = {};
+  const results = await Promise.allSettled(
+    validIds.map(async (chatId) => {
+      const snap = await getDocs(collection(db, 'chats', chatId, 'participant_emails'));
+      for (const d of snap.docs) {
+        const data = d.data() as { uid?: string; email?: string };
+        if (
+          typeof data.uid === 'string' &&
+          data.uid !== currentUid &&
+          typeof data.email === 'string' &&
+          data.email.includes('@')
+        ) {
+          out[chatId] = data.email.trim().toLowerCase();
+          break;
+        }
+      }
+    })
+  );
+  void results;
+  return out;
+}
+

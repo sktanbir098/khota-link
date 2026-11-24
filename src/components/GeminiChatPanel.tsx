@@ -463,14 +463,12 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
       {/* Composer with Stop & Streaming Feedback */}
       <div
         className={`border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shrink-0 chat-composer-container${
-          hasNetlifyBadge ? ' has-netlify-badge' : ''
+          hasNetlifyBadge ? ' has-netlify-badge pb-[52px]' : ''
         }`}
       >
         <form
           onSubmit={(e) => handleSend(e)}
-          className={`p-3 sm:p-4 flex items-center gap-2.5 ${
-            hasNetlifyBadge ? 'pr-[132px] sm:pr-[184px]' : 'pr-4 sm:pr-8'
-          }`}
+          className="p-3 sm:p-4 flex items-center gap-2.5"
         >
           <input
             type="text"

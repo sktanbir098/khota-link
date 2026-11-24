@@ -1,6 +1,25 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { ArrowLeft, Loader2, Mail, Phone, Radio, Sparkles, Trash2, Video, Wifi, X } from 'lucide-react';
+import {
+  ArrowLeft,
+  Bell,
+  BellOff,
+  Check,
+  ExternalLink,
+  Loader2,
+  Mail,
+  Phone,
+  Radio,
+  Send,
+  Sparkles,
+  Trash2,
+  Video,
+  Volume2,
+  VolumeX,
+  Wifi,
+  X,
+} from 'lucide-react';
+import { maskEmail, resolvePeerMaskedHint } from '../lib/firebase';
 import { t } from '../lib/i18n';
 import { AppLanguage, CallMode, ChatRoom, UserPublicProfile, UserStatus } from '../types/chat';
 import { STATUS_GRADIENTS } from './StatusModal';
@@ -15,6 +34,17 @@ interface Props {
   isOnline: boolean;
   presenceLabel: string;
   peerStatuses: UserStatus[];
+  isChatMuted: boolean;
+  isChatSoundMuted: boolean;
+  savedPeerEmail: string;
+  viewerEmail?: string;
+  autoOfferOfflineGmail: boolean;
+  onToggleChatMute: () => void;
+  onToggleChatSoundMute: () => void;
+  onSavePeerEmail: (email: string) => void;
+  onToggleAutoOfferOfflineGmail: () => void;
+  onSendGmailAlert: (toEmail: string) => Promise<void>;
+  getGmailComposeUrl?: (toEmail: string) => string;
   onStartCall?: (mode: CallMode) => void;
   onOpenStatus: (statuses: UserStatus[], index: number) => void;
   onDeleteChat: () => Promise<void>;
@@ -30,6 +60,17 @@ export const PeerProfileModal: React.FC<Props> = ({
   isOnline,
   presenceLabel,
   peerStatuses,
+  isChatMuted,
+  isChatSoundMuted,
+  savedPeerEmail,
+  viewerEmail,
+  autoOfferOfflineGmail,
+  onToggleChatMute,
+  onToggleChatSoundMute,
+  onSavePeerEmail,
+  onToggleAutoOfferOfflineGmail,
+  onSendGmailAlert,
+  getGmailComposeUrl,
   onStartCall,
   onOpenStatus,
   onDeleteChat,
@@ -37,8 +78,55 @@ export const PeerProfileModal: React.FC<Props> = ({
 }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [emailInput, setEmailInput] = useState(savedPeerEmail);
+  const [editingEmail, setEditingEmail] = useState(!savedPeerEmail);
+  const [emailSavedFeedback, setEmailSavedFeedback] = useState(false);
+  const [sendingAlert, setSendingAlert] = useState(false);
+  const [alertStatusMsg, setAlertStatusMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  useEffect(() => {
+    setEmailInput(savedPeerEmail);
+    setEditingEmail(!savedPeerEmail);
+    setAlertStatusMsg(null);
+  }, [savedPeerEmail, chat.id, isOpen]);
 
   if (!isOpen) return null;
+
+  const trimmedEmail = emailInput.trim().toLowerCase();
+  const isEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+  const resolvedPeerHint = resolvePeerMaskedHint({
+    targetHint: chat.targetHint,
+    channel: chat.channel,
+    peerMaskedEmail: peerProfile?.maskedEmail,
+    peerEmail: savedPeerEmail || (isEmailValid ? trimmedEmail : ''),
+    viewerEmail,
+    lang,
+  });
+
+  const handleSaveEmail = () => {
+    onSavePeerEmail(trimmedEmail);
+    setEmailSavedFeedback(true);
+    window.setTimeout(() => setEmailSavedFeedback(false), 1800);
+  };
+
+  const handleSendAlertNow = async () => {
+    if (!isEmailValid || sendingAlert) return;
+    setSendingAlert(true);
+    setAlertStatusMsg(null);
+    try {
+      onSavePeerEmail(trimmedEmail);
+      await onSendGmailAlert(trimmedEmail);
+      setEditingEmail(false);
+      setAlertStatusMsg({ type: 'ok', text: `${t(lang, 'gmailAlertSent')} (${maskEmail(trimmedEmail)})` });
+    } catch (err) {
+      setAlertStatusMsg({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Unable to send Gmail alert.',
+      });
+    } finally {
+      setSendingAlert(false);
+    }
+  };
 
   const handleDeleteClick = async () => {
     if (!confirmDelete) {
@@ -61,7 +149,7 @@ export const PeerProfileModal: React.FC<Props> = ({
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 8 }}
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-md bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl max-h-[90dvh] flex flex-col"
+        className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl max-h-[90dvh] flex flex-col"
       >
         <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -190,9 +278,238 @@ export const PeerProfileModal: React.FC<Props> = ({
                   : 'Nearby Direct'}
               </div>
               <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
-                {chat.targetHint || 'Direct Encrypted Room'}
+                {resolvedPeerHint}
               </div>
             </div>
+          </motion.div>
+
+          {/* Per-User Notification Mute & Sound Controls */}
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22, delay: 0.09, ease: [0.16, 1, 0.3, 1] }}
+            className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3"
+          >
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              {t(lang, 'notifSoundSection')}
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                    isChatMuted
+                      ? 'bg-rose-500/12 text-rose-600 dark:text-rose-400'
+                      : 'bg-blue-600/10 text-blue-600 dark:text-blue-400'
+                  }`}
+                >
+                  {isChatMuted ? <BellOff className="w-4 h-4" /> : <Bell className="w-4 h-4" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                    {t(lang, 'muteNotifsLabel')}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                    {t(lang, 'muteNotifsHint')}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isChatMuted}
+                onClick={onToggleChatMute}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+                  isChatMuted ? 'bg-rose-600' : 'bg-slate-300 dark:bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    isChatMuted ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                    isChatSoundMuted
+                      ? 'bg-slate-200 dark:bg-slate-800 text-slate-500'
+                      : 'bg-emerald-600/10 text-emerald-600 dark:text-emerald-400'
+                  }`}
+                >
+                  {isChatSoundMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                    {t(lang, 'chatSoundLabel')}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                    {t(lang, 'chatSoundHint')}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!isChatSoundMuted}
+                onClick={onToggleChatSoundMute}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+                  !isChatSoundMuted ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    !isChatSoundMuted ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+          </motion.div>
+
+          {/* Offline Gmail Alert Section */}
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22, delay: 0.1, ease: [0.16, 1, 0.3, 1] }}
+            className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3"
+          >
+            <div className="space-y-0.5">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                {t(lang, 'offlineEmailAlertTitle')}
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {t(lang, 'offlineEmailAlertHint')}
+              </p>
+            </div>
+
+            {!editingEmail && isEmailValid ? (
+              <div className="px-3 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-900/60 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                    {t(lang, 'sendingToGmailLabel')}
+                  </div>
+                  <div className="text-xs font-mono-tabular font-semibold text-slate-900 dark:text-white truncate">
+                    {maskEmail(trimmedEmail)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEmailInput('');
+                    setEditingEmail(true);
+                  }}
+                  className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+                >
+                  {t(lang, 'editEmailBtn')}
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  type="email"
+                  value={emailInput}
+                  onChange={(e) => {
+                    setEmailInput(e.target.value);
+                    setAlertStatusMsg(null);
+                  }}
+                  placeholder={t(lang, 'recipientGmailPlaceholder')}
+                  aria-label={t(lang, 'recipientGmailLabel')}
+                  className="flex-1 min-w-0 min-h-[38px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSaveEmail();
+                    if (isEmailValid) setEditingEmail(false);
+                  }}
+                  disabled={!emailInput.trim() || !isEmailValid}
+                  className="min-h-[38px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1 shrink-0"
+                >
+                  {emailSavedFeedback ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : null}
+                  <span>{emailSavedFeedback ? t(lang, 'copied').replace('!', '') : t(lang, 'saveGmailBtn')}</span>
+                </button>
+                {savedPeerEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(savedPeerEmail) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailInput(savedPeerEmail);
+                      setEditingEmail(false);
+                    }}
+                    className="min-h-[38px] px-2.5 rounded-xl text-[11px] font-semibold text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 shrink-0"
+                  >
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  {t(lang, 'autoOfferGmailLabel')}
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                  {t(lang, 'autoOfferGmailHint')}
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoOfferOfflineGmail}
+                onClick={onToggleAutoOfferOfflineGmail}
+                className={`relative w-11 h-6 rounded-full transition-colors shrink-0 ${
+                  autoOfferOfflineGmail ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    autoOfferOfflineGmail ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <button
+              type="button"
+              disabled={!isEmailValid || sendingAlert}
+              onClick={handleSendAlertNow}
+              className="w-full min-h-[40px] px-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+            >
+              {sendingAlert ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Send className="w-3.5 h-3.5" />
+              )}
+              <span>{sendingAlert ? t(lang, 'sendingGmailAlert') : t(lang, 'sendGmailAlertBtn')}</span>
+            </button>
+
+            {alertStatusMsg && (
+              <div className="space-y-2">
+                <p
+                  className={`text-[11px] font-medium ${
+                    alertStatusMsg.type === 'ok'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-red-600 dark:text-red-400'
+                  }`}
+                >
+                  {alertStatusMsg.text}
+                </p>
+                {alertStatusMsg.type === 'err' && isEmailValid && getGmailComposeUrl && (
+                  <a
+                    href={getGmailComposeUrl(trimmedEmail)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full min-h-[38px] px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/60 text-blue-700 dark:text-blue-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>{lang === 'bn' ? 'Gmail-এ সরাসরি পাঠান' : 'Open in Gmail'}</span>
+                  </a>
+                )}
+              </div>
+            )}
           </motion.div>
 
           {/* Peer's Active 24h Statuses */}

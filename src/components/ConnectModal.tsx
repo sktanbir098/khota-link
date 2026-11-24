@@ -13,7 +13,7 @@ interface Props {
   currentUser: UserPublicProfile;
   existingChats: ChatRoom[];
   onClose: () => void;
-  onChatReady: (chatId: string, meta?: { pendingEmail?: string }) => void;
+  onChatReady: (chatId: string, meta?: { pendingEmail?: string; recipientEmail?: string }) => void;
 }
 
 export const ConnectModal: React.FC<Props> = ({
@@ -47,8 +47,10 @@ export const ConnectModal: React.FC<Props> = ({
           targetGmail: gmail,
           existingChats,
         });
+        const cleanGmail = gmail.trim().toLowerCase();
         onChatReady(res.chatId, {
-          pendingEmail: res.isPendingInvite ? gmail.trim().toLowerCase() : undefined,
+          pendingEmail: res.isPendingInvite ? cleanGmail : undefined,
+          recipientEmail: cleanGmail,
         });
         onClose();
       } else {
@@ -74,7 +76,7 @@ export const ConnectModal: React.FC<Props> = ({
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.96, y: 6 }}
         transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-md bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl"
+        className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl"
       >
         <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">

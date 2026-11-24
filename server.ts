@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import nodemailer from 'nodemailer';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 dotenv.config();
@@ -195,6 +196,222 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok' });
+  });
+
+  const getFirebaseApiKey = (): string => {
+    if (process.env.FIREBASE_WEB_API_KEY) return process.env.FIREBASE_WEB_API_KEY;
+    try {
+      const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+      const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { apiKey?: string };
+      return typeof parsed.apiKey === 'string' ? parsed.apiKey : '';
+    } catch {
+      return '';
+    }
+  };
+
+  const escapeHtml = (input: string): string =>
+    input
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+  const isServerMailerConfigured = (): boolean => {
+    const hasSmtp = Boolean(process.env.SMTP_USER?.trim() && process.env.SMTP_PASS?.trim());
+    const hasResend = Boolean(process.env.RESEND_API_KEY?.trim());
+    return hasSmtp || hasResend;
+  };
+
+  app.get('/api/mail-status', (_req, res) => {
+    res.json({ configured: isServerMailerConfigured() });
+  });
+
+  app.post('/api/send-offline-alert', async (req, res) => {
+    if (!isServerMailerConfigured()) {
+      res.status(503).json({
+        ok: false,
+        configured: false,
+        error: 'Official server mailer is not configured yet.',
+      });
+      return;
+    }
+
+    const authHeader = req.headers.authorization || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      res.status(401).json({ ok: false, error: 'Missing authentication token.' });
+      return;
+    }
+
+    const fbApiKey = getFirebaseApiKey();
+    if (!fbApiKey) {
+      res.status(500).json({ ok: false, error: 'Firebase configuration missing on server.' });
+      return;
+    }
+
+    let verifiedEmail = '';
+    try {
+      const lookupRes = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(fbApiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        }
+      );
+      if (!lookupRes.ok) {
+        res.status(401).json({ ok: false, error: 'Invalid or expired login session.' });
+        return;
+      }
+      const lookupData = (await lookupRes.json()) as {
+        users?: Array<{ localId?: string; email?: string }>;
+      };
+      const fbUser = lookupData?.users?.[0];
+      if (!fbUser?.localId) {
+        res.status(401).json({ ok: false, error: 'Unauthorized user.' });
+        return;
+      }
+      verifiedEmail = typeof fbUser.email === 'string' ? fbUser.email : '';
+    } catch {
+      res.status(401).json({ ok: false, error: 'Could not verify login session.' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      to?: string;
+      senderName?: string;
+      messagePreview?: string;
+      chatUrl?: string;
+      isBangla?: boolean;
+    };
+
+    const toEmail = typeof body.to === 'string' ? body.to.trim().toLowerCase() : '';
+    if (!toEmail || toEmail.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
+      res.status(400).json({ ok: false, error: 'Invalid recipient Gmail address.' });
+      return;
+    }
+
+    const senderName =
+      typeof body.senderName === 'string' && body.senderName.trim()
+        ? body.senderName.trim().slice(0, 80)
+        : 'KothaLink User';
+    const preview =
+      typeof body.messagePreview === 'string' && body.messagePreview.trim()
+        ? body.messagePreview.trim().slice(0, 260)
+        : body.isBangla
+        ? 'নতুন মেসেজ পাঠিয়েছেন'
+        : 'Sent you a new message';
+    const rawChatUrl = typeof body.chatUrl === 'string' ? body.chatUrl.trim() : '';
+    const safeChatUrl =
+      rawChatUrl.startsWith('https://') || rawChatUrl.startsWith('http://')
+        ? rawChatUrl.slice(0, 400)
+        : 'https://kothalink.app';
+
+    const subject = body.isBangla
+      ? `KothaLink অ্যালার্ট: ${senderName} আপনাকে মেসেজ করেছেন`
+      : `KothaLink Alert: ${senderName} sent you a message`;
+
+    const textContent = body.isBangla
+      ? `হ্যালো,\n\n${senderName} KothaLink-এ আপনাকে একটি মেসেজ করেছেন:\n"${preview}"\n\nচ্যাটে জয়েন ও রিপ্লাই দিন:\n${safeChatUrl}\n\n— KothaLink Official`
+      : `Hi,\n\n${senderName} sent you a message on KothaLink while you were offline:\n"${preview}"\n\nJoin Chat & Reply directly in KothaLink:\n${safeChatUrl}\n\n— KothaLink Official`;
+
+    const safeSenderHtml = escapeHtml(senderName);
+    const safePreviewHtml = escapeHtml(preview);
+    const safeUrlHtml = escapeHtml(safeChatUrl);
+    const htmlContent = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#f8fafc; padding:24px; color:#0f172a;">
+        <div style="max-width:480px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
+          <div style="background:#2563eb; padding:18px 22px; color:#ffffff;">
+            <div style="font-size:16px; font-weight:700; letter-spacing:-0.01em;">KothaLink</div>
+            <div style="font-size:12px; opacity:0.9; margin-top:2px;">Official Message Alert</div>
+          </div>
+          <div style="padding:22px;">
+            <p style="margin:0 0 12px; font-size:14px; line-height:1.5; color:#334155;">
+              <strong>${safeSenderHtml}</strong> ${
+                body.isBangla
+                  ? 'আপনাকে একটি মেসেজ করেছেন (আপনি তখন অফলাইনে ছিলেন):'
+                  : 'sent you a message while you were offline:'
+              }
+            </p>
+            <div style="background:#f1f5f9; border-left:3px solid #2563eb; border-radius:8px; padding:12px 14px; font-size:14px; color:#0f172a; margin:0 0 18px;">
+              "${safePreviewHtml}"
+            </div>
+            <a href="${safeUrlHtml}" style="display:inline-block; background:#2563eb; color:#ffffff; text-decoration:none; font-weight:600; font-size:14px; padding:12px 20px; border-radius:10px;">
+              ${body.isBangla ? 'চ্যাটে জয়েন ও রিপ্লাই দিন' : 'Join Chat & Reply'}
+            </a>
+            <p style="margin:14px 0 0; font-size:12px; color:#475569; word-break:break-all;">
+              <a href="${safeUrlHtml}" style="color:#2563eb; text-decoration:underline;">${safeUrlHtml}</a>
+            </p>
+            <p style="margin:14px 0 0; font-size:11px; color:#64748b;">
+              ${body.isBangla ? 'এই মেসেজটি KothaLink অফিশিয়াল অ্যালার্ট সিস্টেম থেকে পাঠানো হয়েছে।' : 'Sent via KothaLink Official Alert System.'}
+            </p>
+          </div>
+        </div>
+      </div>
+    `;
+
+    try {
+      const smtpUser = process.env.SMTP_USER?.trim();
+      const smtpPass = process.env.SMTP_PASS?.trim();
+      if (smtpUser && smtpPass) {
+        const smtpHost = process.env.SMTP_HOST?.trim() || 'smtp.gmail.com';
+        const smtpPort = Number(process.env.SMTP_PORT) || 465;
+        const fromLabel = process.env.SMTP_FROM?.trim() || 'KothaLink Alerts';
+        const transporter = nodemailer.createTransport({
+          host: smtpHost,
+          port: smtpPort,
+          secure: smtpPort === 465,
+          auth: { user: smtpUser, pass: smtpPass },
+        });
+        await transporter.sendMail({
+          from: `${fromLabel} <${smtpUser}>`,
+          to: toEmail,
+          ...(verifiedEmail ? { replyTo: `${senderName} <${verifiedEmail}>` } : {}),
+          subject,
+          text: textContent,
+          html: htmlContent,
+        });
+        res.json({ ok: true, mode: 'official-smtp' });
+        return;
+      }
+
+      const resendKey = process.env.RESEND_API_KEY?.trim();
+      if (resendKey) {
+        const fromAddr = process.env.SMTP_FROM?.trim() || 'KothaLink Alerts <onboarding@resend.dev>';
+        const resendRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: fromAddr,
+            to: [toEmail],
+            ...(verifiedEmail ? { reply_to: verifiedEmail } : {}),
+            subject,
+            text: textContent,
+            html: htmlContent,
+          }),
+        });
+        if (!resendRes.ok) {
+          const errData = await resendRes.json().catch(() => ({}));
+          throw new Error(
+            (errData as { message?: string })?.message || `Resend failed (HTTP ${resendRes.status}).`
+          );
+        }
+        res.json({ ok: true, mode: 'official-resend' });
+        return;
+      }
+
+      res.status(503).json({ ok: false, configured: false, error: 'No mailer configured.' });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        configured: true,
+        error: err instanceof Error ? err.message : 'Failed to send official email.',
+      });
+    }
   });
 
   app.post('/api/gemini/stream', async (req, res) => {

@@ -408,9 +408,9 @@ export const ProfileModal: React.FC<Props> = ({
                         <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-950 liquid-control rounded-xl border border-slate-200 dark:border-slate-800">
                           {(
                             [
+                              { id: 'light' as const, label: t(lang, 'lightMode'), Icon: Sun },
                               { id: 'glass' as const, label: t(lang, 'glassMode'), Icon: Droplets },
                               { id: 'dark' as const, label: t(lang, 'darkMode'), Icon: Moon },
-                              { id: 'light' as const, label: t(lang, 'lightMode'), Icon: Sun },
                             ] as const
                           ).map((opt) => {
                             const active = themeMode === opt.id;

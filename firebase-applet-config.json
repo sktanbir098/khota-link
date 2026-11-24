@@ -3,10 +3,10 @@
   "appId": "1:693711034390:web:476c535bb96ec004ccfd37",
   "apiKey": "AIzaSyBDXnaKkO8umNd_4geRplNyx2NUnd3ddUk",
   "authDomain": "khota-link-b3ac7.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-2cdc5e94-3259-4c61-9dd7-75f694782264",
   "storageBucket": "khota-link-b3ac7.firebasestorage.app",
   "messagingSenderId": "693711034390",
   "measurementId": "",
   "oAuthClientId": "693711034390-rrvfb8shqa1bhirqhttp7124t5r30lkb.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
+  "recaptchaSiteKey": "",
+  "firestoreDatabaseId": "ai-studio-2cdc5e94-3259-4c61-9dd7-75f694782264"
 }

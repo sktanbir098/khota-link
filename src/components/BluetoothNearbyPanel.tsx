@@ -572,14 +572,12 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
 
               <div
                 className={`border-t border-slate-200 dark:border-slate-800 shrink-0 chat-composer-container${
-                  hasNetlifyBadge ? ' has-netlify-badge' : ''
+                  hasNetlifyBadge ? ' has-netlify-badge pb-[52px]' : ''
                 }`}
               >
                 <form
                   onSubmit={handleSendBle}
-                  className={`p-4 flex items-center gap-3 ${
-                    hasNetlifyBadge ? 'pr-[132px] sm:pr-[184px]' : 'pr-4 sm:pr-8'
-                  }`}
+                  className="p-3 sm:p-4 flex items-center gap-2.5"
                 >
                   <input
                     type="text"
@@ -853,13 +851,9 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
               >
                 <form
                   onSubmit={handleSendNearby}
-                  className="p-3 sm:p-4 space-y-2"
+                  className="px-2.5 pt-2 pb-1.5 sm:px-4 sm:pt-3 sm:pb-2.5 space-y-2"
                 >
-                  <div
-                    className={`flex items-center gap-2 ${
-                      hasNetlifyBadge ? 'pr-[128px] sm:pr-[180px]' : 'pr-2 sm:pr-6'
-                    }`}
-                  >
+                  <div className="flex items-center gap-2">
                     <input
                       type="text"
                       value={nearbyInput}
@@ -886,7 +880,11 @@ export const BluetoothNearbyPanel: React.FC<Props> = ({
                       <span className="hidden sm:inline">{t(lang, 'send')}</span>
                     </motion.button>
                   </div>
-                  <div className="flex items-center gap-1.5 justify-start">
+                  <div
+                    className={`flex items-center gap-1.5 justify-start overflow-x-auto no-scrollbar min-h-[42px] ${
+                      hasNetlifyBadge ? 'pr-[186px] sm:pr-[206px]' : ''
+                    }`}
+                  >
                     <button
                       type="button"
                       disabled={nearbyStatus !== 'p2p-open' || nearbyPreparingAtt}

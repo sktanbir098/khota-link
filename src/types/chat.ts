@@ -114,6 +114,7 @@ export interface UserPublicProfile {
   displayName: string;
   photoUrl: string;
   bio: string;
+  maskedEmail?: string;
   hasPhone: boolean;
   showOnlineStatus?: boolean;
   onlineStatus: 'online' | 'away' | 'offline';
@@ -148,6 +149,7 @@ export interface ChatRoom {
   participantIds: string[];
   inviteCode: string;
   pendingRecipientHash?: string;
+  participantEmails?: Record<string, string>;
   lastMessageText: string;
   lastMessageSenderId: string;
   lastMessageAt: Timestamp | null;
@@ -178,6 +180,8 @@ export interface ChatMessage {
   transport: MessageTransport;
   replyToText: string;
   createdAt: Timestamp | null;
+  deliveredAt?: Timestamp | null;
+  readAt?: Timestamp | null;
   optimistic?: boolean;
 }
 
@@ -218,7 +222,13 @@ export interface LocalDirectMessage {
 }
 
 export const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥'] as const;
-export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
+export const EXTRA_REACTION_EMOJIS = [
+  '👏', '🎉', '😍', '🥰', '😘', '🤔', '🤯', '😭',
+  '😡', '💯', '✨', '🤝', '🙌', '👀', '💀', '🥳',
+  '🤩', '🤗', '🫡', '🫶', '⚡', '🌹', '☕', '💪',
+  '✅', '❌', '👌', '😎',
+] as const;
+export type ReactionEmoji = string;
 
 export interface MessageReaction {
   id: string;

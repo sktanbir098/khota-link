@@ -24,6 +24,10 @@
           "type": "string",
           "maxLength": 160
         },
+        "maskedEmail": {
+          "type": "string",
+          "maxLength": 120
+        },
         "hasPhone": {
           "type": "boolean"
         },
@@ -239,6 +243,14 @@
         "createdAt": {
           "type": "string",
           "format": "date-time"
+        },
+        "deliveredAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "readAt": {
+          "type": "string",
+          "format": "date-time"
         }
       },
       "required": [
@@ -413,7 +425,8 @@
         },
         "emoji": {
           "type": "string",
-          "enum": ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥"]
+          "minLength": 1,
+          "maxLength": 16
         },
         "updatedAt": {
           "type": "string",
@@ -758,6 +771,29 @@
         }
       },
       "required": ["id", "recipientHash", "chatId", "creatorId", "creatorName", "createdAt"]
+    },
+    "ParticipantEmail": {
+      "title": "ParticipantEmail",
+      "description": "Verified Gmail address of a chat participant, strictly readable only by co-participants of that chat room.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "updatedAt"]
     }
   },
   "firestore": {
@@ -796,6 +832,10 @@
     "/chats/{chatId}/typing/{userId}": {
       "schema": { "$ref": "#/entities/TypingStatus" },
       "description": "Real-time typing status per chat participant."
+    },
+    "/chats/{chatId}/participant_emails/{userId}": {
+      "schema": { "$ref": "#/entities/ParticipantEmail" },
+      "description": "Verified participant Gmail address scoped strictly to co-participants of that chat room."
     },
     "/chat_invites/{inviteCode}": {
       "schema": { "$ref": "#/entities/ChatInvite" },

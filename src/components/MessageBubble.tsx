@@ -1,20 +1,31 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Timestamp } from 'firebase/firestore';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Check,
-  Clock,
   Copy,
   Download,
   FileText,
+  Info,
   Loader2,
   Mic,
   Pause,
   Play,
+  Plus,
   Reply,
+  Send,
   Smile,
+  Trash2,
 } from 'lucide-react';
 import { formatFileSize, triggerFileDownload } from '../lib/attachments';
-import { AttachmentType, REACTION_EMOJIS, ReactionEmoji } from '../types/chat';
+import { t } from '../lib/i18n';
+import {
+  AppLanguage,
+  AttachmentType,
+  EXTRA_REACTION_EMOJIS,
+  REACTION_EMOJIS,
+  ReactionEmoji,
+} from '../types/chat';
 
 export interface AggregatedReaction {
   emoji: ReactionEmoji;
@@ -24,6 +35,7 @@ export interface AggregatedReaction {
 
 interface Props {
   id: string;
+  lang?: AppLanguage;
   text: string;
   senderName: string;
   timestampText: string;
@@ -34,6 +46,8 @@ interface Props {
   attachmentMime?: string;
   attachmentSize?: number;
   attachmentData?: string;
+  deliveredAt?: Timestamp | null;
+  readAt?: Timestamp | null;
   optimistic?: boolean;
   justSent?: boolean;
   justArrived?: boolean;
@@ -41,6 +55,8 @@ interface Props {
   onReact: (emoji: ReactionEmoji) => void;
   onReply?: () => void;
   onCopy?: () => void;
+  onShowInfo?: () => void;
+  onDelete?: () => Promise<void> | void;
   onPreviewImage?: (dataUrl: string, name: string) => void;
   onResolveAttachment?: (messageId: string, marker: string) => Promise<string>;
 }
@@ -55,6 +71,7 @@ function formatAudioSeconds(sec: number): string {
 
 export const MessageBubble: React.FC<Props> = ({
   id,
+  lang = 'en',
   text,
   senderName,
   timestampText,
@@ -65,6 +82,8 @@ export const MessageBubble: React.FC<Props> = ({
   attachmentMime = '',
   attachmentSize = 0,
   attachmentData = '',
+  deliveredAt = null,
+  readAt = null,
   optimistic = false,
   justSent = false,
   justArrived = false,
@@ -72,10 +91,15 @@ export const MessageBubble: React.FC<Props> = ({
   onReact,
   onReply,
   onCopy,
+  onShowInfo,
+  onDelete,
   onPreviewImage,
   onResolveAttachment,
 }) => {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [showMoreEmojis, setShowMoreEmojis] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deletingMsg, setDeletingMsg] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
   const [resolvedUrl, setResolvedUrl] = useState<string>(() =>
     attachmentData && !attachmentData.startsWith('chunked:') ? attachmentData : ''
@@ -100,6 +124,11 @@ export const MessageBubble: React.FC<Props> = ({
     (attachmentMime.startsWith('audio/') ||
       /\.(webm|ogg|mp3|wav|m4a|aac)$/i.test(attachmentName || '') ||
       /^voice\s*message/i.test(attachmentName || ''));
+  const isVideoAttachment =
+    hasFile &&
+    !isAudioAttachment &&
+    (attachmentMime.startsWith('video/') ||
+      /\.(mp4|mov|m4v|ogv|avi|mkv)$/i.test(attachmentName || ''));
 
   const labelDurationMatch = attachmentName.match(/\((\d+:\d{2})\)/);
   const fallbackDurationLabel = labelDurationMatch ? labelDurationMatch[1] : '';
@@ -113,7 +142,7 @@ export const MessageBubble: React.FC<Props> = ({
       setResolvedUrl(attachmentData);
       return;
     }
-    if ((attachmentType === 'image' || isAudioAttachment) && onResolveAttachment && !resolvedUrl) {
+    if ((attachmentType === 'image' || isAudioAttachment || isVideoAttachment) && onResolveAttachment && !resolvedUrl) {
       let cancelled = false;
       if (attachmentType === 'image') setLoadingChunkedImage(true);
       onResolveAttachment(id, attachmentData)
@@ -130,10 +159,14 @@ export const MessageBubble: React.FC<Props> = ({
         cancelled = true;
       };
     }
-  }, [id, attachmentData, attachmentType, isAudioAttachment, onResolveAttachment, resolvedUrl]);
+  }, [id, attachmentData, attachmentType, isAudioAttachment, isVideoAttachment, onResolveAttachment, resolvedUrl]);
 
   useEffect(() => {
-    if (!pickerOpen) return;
+    if (!pickerOpen) {
+      setShowMoreEmojis(false);
+      setConfirmingDelete(false);
+      return;
+    }
     const handleOutside = (e: MouseEvent | TouchEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setPickerOpen(false);
@@ -164,6 +197,22 @@ export const MessageBubble: React.FC<Props> = ({
   const handleSelectEmoji = (emoji: ReactionEmoji) => {
     onReact(emoji);
     setPickerOpen(false);
+  };
+
+  const handleDeleteAction = async () => {
+    if (!onDelete || deletingMsg) return;
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    setDeletingMsg(true);
+    try {
+      await onDelete();
+      setPickerOpen(false);
+    } finally {
+      setDeletingMsg(false);
+      setConfirmingDelete(false);
+    }
   };
 
   const handleDownloadFile = async () => {
@@ -231,93 +280,184 @@ export const MessageBubble: React.FC<Props> = ({
         animateSend
           ? {
               opacity: 0,
-              y: 30,
-              x: 20,
-              scale: 0.72,
+              y: 18,
+              scale: 0.92,
             }
           : animateArrival
           ? {
               opacity: 0,
-              x: -32,
               y: 12,
-              scale: 0.94,
+              x: -16,
+              scale: 0.96,
             }
           : false
       }
-      animate={
-        animateSend
-          ? {
-              opacity: 1,
-              y: [30, -4, 0],
-              x: 0,
-              scale: [0.72, 1.055, 1],
-            }
-          : {
-              opacity: 1,
-              y: 0,
-              x: 0,
-              scale: 1,
-            }
-      }
+      animate={{
+        opacity: 1,
+        y: 0,
+        x: 0,
+        scale: 1,
+      }}
       transition={
-        animateSend
-          ? {
-              duration: 0.44,
-              ease: [0.22, 1.28, 0.36, 1],
-            }
-          : animateArrival
+        animateSend || animateArrival
           ? {
               type: 'spring',
-              stiffness: 310,
-              damping: 25,
-              mass: 0.82,
+              stiffness: 320,
+              damping: 26,
+              mass: 0.85,
             }
           : {
-              duration: 0.14,
+              duration: 0.2,
+              ease: [0.22, 1, 0.36, 1],
             }
       }
       className={`group relative flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
     >
-      {/* Floating Reaction Picker Popover */}
+      {/* Floating Reaction + Long-Press Action Menu Popover */}
       <AnimatePresence>
         {pickerOpen && (
           <motion.div
-            initial={{ opacity: 0, y: 6, scale: 0.92 }}
+            initial={{ opacity: 0, y: 8, scale: 0.92 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 4, scale: 0.94 }}
-            transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
-            className={`z-20 mb-1.5 px-2 py-1.5 rounded-2xl bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-700 shadow-lg flex items-center gap-1 ${
+            transition={{ type: 'spring', stiffness: 420, damping: 28 }}
+            className={`z-30 mb-1.5 p-2 rounded-2xl bg-white/95 dark:bg-slate-900/95 liquid-modal border border-slate-200 dark:border-slate-700 shadow-xl backdrop-blur-md flex flex-col gap-1.5 max-w-[88vw] ${
               isMe ? 'self-end' : 'self-start'
             }`}
           >
-            {REACTION_EMOJIS.map((emoji) => (
+            {/* Primary Quick Reactions + "+" More Emojis Button */}
+            <div className="flex items-center gap-0.5 flex-wrap">
+              {REACTION_EMOJIS.map((emoji) => (
+                <motion.button
+                  key={emoji}
+                  type="button"
+                  whileHover={{ scale: 1.22 }}
+                  whileTap={{ scale: 0.88 }}
+                  onClick={() => handleSelectEmoji(emoji)}
+                  className="w-8 h-8 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-lg transition-colors"
+                  aria-label={`React with ${emoji}`}
+                >
+                  {emoji}
+                </motion.button>
+              ))}
               <motion.button
-                key={emoji}
                 type="button"
-                whileHover={{ scale: 1.22 }}
+                whileHover={{ scale: 1.1 }}
                 whileTap={{ scale: 0.9 }}
-                onClick={() => handleSelectEmoji(emoji)}
-                className="w-8 h-8 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-lg transition-colors"
-                aria-label={`React with ${emoji}`}
+                onClick={() => setShowMoreEmojis((prev) => !prev)}
+                aria-label={t(lang, 'msgMoreEmojisLabel')}
+                title={t(lang, 'msgMoreEmojisLabel')}
+                className={`w-8 h-8 rounded-xl flex items-center justify-center transition-colors ${
+                  showMoreEmojis
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                }`}
               >
-                {emoji}
+                <Plus className={`w-4 h-4 transition-transform duration-200 ${showMoreEmojis ? 'rotate-45' : ''}`} />
               </motion.button>
-            ))}
+            </div>
+
+            {/* Expandable Full Emoji Drawer */}
+            <AnimatePresence initial={false}>
+              {showMoreEmojis && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                  className="overflow-hidden border-t border-slate-100 dark:border-slate-800 pt-1.5"
+                >
+                  <div className="grid grid-cols-7 gap-0.5 max-h-36 overflow-y-auto">
+                    {EXTRA_REACTION_EMOJIS.map((emoji) => (
+                      <motion.button
+                        key={emoji}
+                        type="button"
+                        whileHover={{ scale: 1.18 }}
+                        whileTap={{ scale: 0.88 }}
+                        onClick={() => handleSelectEmoji(emoji)}
+                        className="w-8 h-8 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-lg transition-colors"
+                        aria-label={`React with ${emoji}`}
+                      >
+                        {emoji}
+                      </motion.button>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Long-Press Actions: Info, Reply, Copy, Delete */}
+            {(onShowInfo || onReply || (onCopy && text) || onDelete) && (
+              <div className="pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center gap-1 flex-wrap">
+                {onShowInfo && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPickerOpen(false);
+                      onShowInfo();
+                    }}
+                    className="min-h-[32px] px-2.5 rounded-xl bg-slate-100/80 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Info className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                    <span>{t(lang, 'msgInfoBtn')}</span>
+                  </button>
+                )}
+                {onReply && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPickerOpen(false);
+                      onReply();
+                    }}
+                    className="min-h-[32px] px-2.5 rounded-xl bg-slate-100/80 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Reply className="w-3.5 h-3.5" />
+                    <span>{t(lang, 'msgReplyBtn')}</span>
+                  </button>
+                )}
+                {onCopy && text && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onCopy();
+                      setCopiedText(true);
+                      window.setTimeout(() => setCopiedText(false), 1600);
+                      setPickerOpen(false);
+                    }}
+                    className="min-h-[32px] px-2.5 rounded-xl bg-slate-100/80 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>{t(lang, 'msgCopyBtn')}</span>
+                  </button>
+                )}
+                {onDelete && !optimistic && (
+                  <button
+                    type="button"
+                    disabled={deletingMsg}
+                    onClick={handleDeleteAction}
+                    className={`min-h-[32px] px-2.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                      confirmingDelete
+                        ? 'bg-red-600 hover:bg-red-700 text-white'
+                        : 'bg-red-50 dark:bg-red-950/50 hover:bg-red-100 dark:hover:bg-red-950/80 text-red-600 dark:text-red-400'
+                    }`}
+                  >
+                    {deletingMsg ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {confirmingDelete ? t(lang, 'msgDeleteConfirmBtn') : t(lang, 'msgDeleteBtn')}
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
 
       <div className={`relative flex items-end gap-1.5 max-w-full ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
-        {/* Soft bubble-pop halo ring on newly sent outgoing message */}
-        {animateSend && (
-          <motion.span
-            aria-hidden="true"
-            initial={{ scale: 0.78, opacity: 0.72 }}
-            animate={{ scale: 1.18, opacity: 0 }}
-            transition={{ duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
-            className="pointer-events-none absolute -inset-1 rounded-3xl border-2 border-blue-400/70 dark:border-blue-300/50"
-          />
-        )}
         {/* Message Bubble (supports 420ms long-press on touch or mouse) */}
         <div
           onPointerDown={startLongPress}
@@ -328,7 +468,7 @@ export const MessageBubble: React.FC<Props> = ({
             e.preventDefault();
             setPickerOpen(true);
           }}
-          className={`relative overflow-hidden select-text max-w-[78vw] sm:max-w-md lg:max-w-lg rounded-2xl transition-transform active:scale-[0.99] ${
+          className={`relative overflow-hidden select-text max-w-[78vw] sm:max-w-md lg:max-w-lg rounded-2xl transition-all duration-200 ease-out active:scale-[0.985] ${
             hasImage && !text && !replyToText ? 'p-1.5' : 'px-4 py-2.5'
           } ${
             isMe
@@ -336,26 +476,6 @@ export const MessageBubble: React.FC<Props> = ({
               : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 liquid-bubble-peer'
           }`}
         >
-          {/* Send launch sheen sweep when outgoing message is sent */}
-          {animateSend && (
-            <motion.span
-              aria-hidden="true"
-              initial={{ x: '-120%', opacity: 0.75 }}
-              animate={{ x: '220%', opacity: 0 }}
-              transition={{ duration: 0.78, ease: [0.16, 1, 0.3, 1] }}
-              className="pointer-events-none absolute inset-y-0 w-1/2 -skew-x-12 bg-gradient-to-r from-transparent via-white/40 to-transparent"
-            />
-          )}
-          {/* Subtle arrival shimmer sweep when a new incoming message arrives */}
-          {animateArrival && (
-            <motion.span
-              aria-hidden="true"
-              initial={{ x: '-120%', opacity: 0.6 }}
-              animate={{ x: '220%', opacity: 0 }}
-              transition={{ duration: 0.85, ease: [0.16, 1, 0.3, 1] }}
-              className="pointer-events-none absolute inset-y-0 w-1/2 -skew-x-12 bg-gradient-to-r from-transparent via-blue-400/25 dark:via-blue-300/20 to-transparent"
-            />
-          )}
           {replyToText && (
             <div
               className={`mb-1.5 pb-1.5 border-b text-xs truncate ${
@@ -505,7 +625,35 @@ export const MessageBubble: React.FC<Props> = ({
             </div>
           )}
 
-          {hasFile && !isAudioAttachment && (
+          {hasFile && isVideoAttachment && (
+            <div className={text ? 'mb-2' : ''}>
+              {resolvedUrl ? (
+                <video
+                  src={resolvedUrl}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  className="max-h-64 w-full max-w-[260px] sm:max-w-[320px] rounded-xl bg-black/90 object-contain"
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleDownloadFile}
+                  disabled={downloadingFile}
+                  className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl border text-xs font-medium ${
+                    isMe
+                      ? 'bg-blue-700/50 border-white/25 text-white'
+                      : 'bg-slate-50 dark:bg-slate-800/70 liquid-control border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
+                  }`}
+                >
+                  {downloadingFile ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  <span className="truncate">{attachmentName || 'Download video'}</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          {hasFile && !isAudioAttachment && !isVideoAttachment && (
             <button
               type="button"
               onClick={handleDownloadFile}
@@ -548,28 +696,46 @@ export const MessageBubble: React.FC<Props> = ({
           )}
 
           <div
-            className={`mt-1 flex items-center gap-1 text-[11px] font-mono-tabular ${
+            className={`mt-1 flex items-center gap-1.5 text-[11px] font-mono-tabular ${
               hasImage && !text && !replyToText ? 'px-2 pb-1' : ''
             } ${
               isMe ? 'text-blue-100 justify-end' : 'text-slate-400 justify-start'
             }`}
           >
             <span>{isMe ? timestampText : `${senderName} · ${timestampText}`}</span>
-            {isMe && (
-              <motion.span
-                key={optimistic ? 'sending' : 'sent'}
-                initial={{ scale: 0.6, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ duration: 0.16 }}
-                className="inline-flex items-center"
-              >
-                {optimistic ? (
-                  <Clock className="w-3 h-3 opacity-80" aria-label="Sending" />
-                ) : (
-                  <Check className="w-3 h-3 opacity-95" aria-label="Sent" />
-                )}
-              </motion.span>
-            )}
+            {isMe && (() => {
+              const deliveryState = readAt ? 'seen' : deliveredAt ? 'delivered' : 'sent';
+              const planeColorClass =
+                deliveryState === 'seen'
+                  ? 'text-emerald-300 fill-emerald-300/25 drop-shadow-[0_0_5px_rgba(110,231,183,0.55)]'
+                  : deliveryState === 'delivered'
+                  ? 'text-amber-300 fill-amber-300/20 drop-shadow-[0_0_4px_rgba(252,211,77,0.45)]'
+                  : optimistic
+                  ? 'text-white/70 animate-pulse'
+                  : 'text-white/95';
+              const statusLabel =
+                deliveryState === 'seen'
+                  ? t(lang, 'msgSeenLabel')
+                  : deliveryState === 'delivered'
+                  ? t(lang, 'msgDeliveredLabel')
+                  : t(lang, 'msgSentLabel');
+              return (
+                <motion.span
+                  key={deliveryState}
+                  initial={{ scale: 0.65, opacity: 0.5 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ type: 'spring', stiffness: 420, damping: 22 }}
+                  title={statusLabel}
+                  className="inline-flex items-center"
+                >
+                  <Send
+                    className={`w-3.5 h-3.5 -rotate-12 transition-colors duration-200 ${planeColorClass}`}
+                    strokeWidth={2.2}
+                    aria-label={statusLabel}
+                  />
+                </motion.span>
+              );
+            })()}
           </div>
         </div>
 
@@ -639,6 +805,19 @@ export const MessageBubble: React.FC<Props> = ({
                 <span>{r.count}</span>
               </motion.button>
             ))}
+            <motion.button
+              type="button"
+              whileTap={{ scale: 0.9 }}
+              onClick={() => {
+                setPickerOpen(true);
+                setShowMoreEmojis(true);
+              }}
+              aria-label={t(lang, 'msgMoreEmojisLabel')}
+              title={t(lang, 'msgMoreEmojisLabel')}
+              className="inline-flex items-center justify-center w-6 h-6 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 liquid-control text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              <Plus className="w-3 h-3" />
+            </motion.button>
           </motion.div>
         )}
       </AnimatePresence>
