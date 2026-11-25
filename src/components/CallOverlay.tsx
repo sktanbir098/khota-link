@@ -766,7 +766,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
           initial={{ opacity: 0, y: -14, scale: 0.92 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -14, scale: 0.92 }}
-          className="fixed top-3 right-3 z-[60] max-w-[92vw] bg-slate-900/80 text-white border border-white/20 rounded-2xl shadow-2xl px-3.5 py-2.5 flex items-center gap-3 backdrop-blur-2xl"
+          className="fixed top-3 right-3 z-[60] max-w-[92vw] bg-slate-900/95 text-white border border-white/20 rounded-2xl shadow-2xl px-3.5 py-2.5 flex items-center gap-3"
         >
           <UserAvatar
             name={activeCall.peerName}
@@ -821,7 +821,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[60] bg-slate-950/90 backdrop-blur-2xl flex items-center justify-center p-0 sm:p-4"
+          className="fixed inset-0 z-[60] bg-slate-950/95 flex items-center justify-center p-0 sm:p-4"
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.94, y: 18 }}
@@ -1089,7 +1089,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                 <motion.div
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="absolute top-3 left-1/2 -translate-x-1/2 z-20 px-3.5 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-xs font-mono-tabular text-white flex items-center gap-2"
+                  className="absolute top-3 left-1/2 -translate-x-1/2 z-20 px-3.5 py-1.5 rounded-full bg-black/75 border border-white/15 text-xs font-mono-tabular text-white flex items-center gap-2"
                 >
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                   <span className="font-semibold truncate max-w-[140px]">{activeCall.peerName}</span>
@@ -1195,10 +1195,10 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                     whileTap={{ scale: 0.9 }}
                     onClick={toggleMic}
                     aria-label={micMuted ? t(lang, 'unmuteMic') : t(lang, 'muteMic')}
-                    className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors backdrop-blur-xl border ${
+                    className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors border ${
                       micMuted
                         ? 'bg-amber-500 border-amber-400 text-slate-950'
-                        : 'bg-white/15 border-white/20 hover:bg-white/25 text-white'
+                        : 'bg-slate-800/90 border-white/20 hover:bg-slate-700 text-white'
                     }`}
                   >
                     {micMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
@@ -1214,10 +1214,10 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                         whileTap={{ scale: 0.9 }}
                         onClick={toggleCamera}
                         aria-label={camOff ? t(lang, 'cameraOn') : t(lang, 'cameraOff')}
-                        className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors backdrop-blur-xl border ${
+                        className={`min-h-[52px] min-w-[52px] px-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 transition-colors border ${
                           camOff
                             ? 'bg-amber-500 border-amber-400 text-slate-950'
-                            : 'bg-white/15 border-white/20 hover:bg-white/25 text-white'
+                            : 'bg-slate-800/90 border-white/20 hover:bg-slate-700 text-white'
                         }`}
                       >
                         {camOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
@@ -1231,7 +1231,7 @@ export const CallOverlay: React.FC<Props> = ({ lang, currentUser, activeCall, on
                         whileTap={{ scale: 0.9 }}
                         onClick={() => void switchCamera()}
                         aria-label={t(lang, 'switchCamera')}
-                        className="min-h-[52px] min-w-[52px] px-3.5 rounded-2xl bg-white/15 border border-white/20 hover:bg-white/25 backdrop-blur-xl text-white flex flex-col items-center justify-center gap-1 transition-colors"
+                        className="min-h-[52px] min-w-[52px] px-3.5 rounded-2xl bg-slate-800/90 border border-white/20 hover:bg-slate-700 text-white flex flex-col items-center justify-center gap-1 transition-colors"
                       >
                         <RefreshCw className="w-5 h-5" />
                         <span className="text-[10px] font-medium whitespace-nowrap">

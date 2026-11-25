@@ -26,6 +26,7 @@ import {
   ChatInvite,
   ChatMessage,
   ChatRoom,
+  CURRENT_POLICY_VERSION,
   DirectoryEntry,
   LIMITS,
   MessageReaction,
@@ -33,6 +34,7 @@ import {
   PendingDelivery,
   PreparedAttachment,
   ReactionEmoji,
+  ReportReason,
   StatusBgGradient,
   StatusComment,
   StatusReaction,
@@ -40,6 +42,8 @@ import {
   TypingStatus,
   UserPrivateInfo,
   UserPublicProfile,
+  UserSearchEntry,
+  UserSearchResult,
   UserStatus,
 } from '../types/chat';
 import {
@@ -145,6 +149,7 @@ export async function ensureUserProfile(user: User): Promise<{
       ...(maskedEmail ? { maskedEmail } : {}),
       hasPhone: false,
       showOnlineStatus: true,
+      searchable: true,
       onlineStatus: 'online',
       lastSeenAt: serverTimestamp(),
       createdAt: serverTimestamp(),
@@ -195,6 +200,10 @@ export async function ensureUserProfile(user: User): Promise<{
       email,
       phoneNumber: '',
       language: 'en',
+      readReceiptsEnabled: true,
+      blockedUids: [],
+      acceptedPolicyVersion: CURRENT_POLICY_VERSION,
+      acceptedPolicyAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } else {
@@ -239,6 +248,7 @@ export async function ensureUserProfile(user: User): Promise<{
             ...(maskedEmail ? { maskedEmail } : {}),
             hasPhone: false,
             showOnlineStatus: typeof existingPublic.showOnlineStatus === 'boolean' ? existingPublic.showOnlineStatus : true,
+            searchable: existingPublic.searchable !== false,
             onlineStatus: 'online',
             lastSeenAt: serverTimestamp(),
             createdAt: serverTimestamp(),
@@ -248,11 +258,24 @@ export async function ensureUserProfile(user: User): Promise<{
         if (existingPrivate) {
           await deleteDoc(privateRef).catch(() => null);
         }
+        const safePinned = Array.isArray(existingPrivate?.pinnedChatIds)
+          ? existingPrivate.pinnedChatIds
+              .filter((id): id is string => typeof id === 'string' && LIMITS.ID_PATTERN.test(id) && id.length <= LIMITS.ID_MAX)
+              .slice(0, LIMITS.PINNED_CHATS_MAX)
+          : [];
+        const safeBlocked = Array.isArray(existingPrivate?.blockedUids)
+          ? existingPrivate.blockedUids
+              .filter((id): id is string => typeof id === 'string' && LIMITS.ID_PATTERN.test(id) && id.length <= LIMITS.ID_MAX)
+              .slice(0, LIMITS.BLOCKED_USERS_MAX)
+          : [];
         await setDoc(privateRef, {
           uid: user.uid,
           email: email || sanitizeStr(existingPrivate?.email || '', LIMITS.EMAIL_MAX),
           phoneNumber: '',
           language: existingPrivate?.language === 'bn' ? 'bn' : 'en',
+          readReceiptsEnabled: existingPrivate?.readReceiptsEnabled !== false,
+          ...(safeBlocked.length > 0 ? { blockedUids: safeBlocked } : {}),
+          ...(safePinned.length > 0 ? { pinnedChatIds: safePinned } : {}),
           updatedAt: serverTimestamp(),
         });
       } catch (repairErr) {
@@ -295,22 +318,63 @@ export async function ensureUserProfile(user: User): Promise<{
     })();
   }
 
-  if (!needsFreshRead && existingPublic && existingPrivate) {
-    return {
-      publicProfile: existingPublic,
-      privateInfo: existingPrivate,
-    };
+  const resolvedPublic =
+    !needsFreshRead && existingPublic
+      ? existingPublic
+      : ((await getDoc(userRef).catch((e) =>
+          handleFirestoreError(e, OperationType.GET, `users/${user.uid}`)
+        )).data() as UserPublicProfile);
+
+  const resolvedPrivate =
+    !needsFreshRead && existingPrivate
+      ? existingPrivate
+      : ((await getDoc(privateRef).catch((e) =>
+          handleFirestoreError(e, OperationType.GET, `users/${user.uid}/private/info`)
+        )).data() as UserPrivateInfo);
+
+  if (resolvedPublic && resolvedPublic.searchable !== false) {
+    void syncUserSearchBuckets({
+      uid: user.uid,
+      displayName: resolvedPublic.displayName,
+      photoUrl: resolvedPublic.photoUrl,
+      bio: resolvedPublic.bio,
+      maskedEmail: resolvedPublic.maskedEmail || maskedEmail,
+      email: email || resolvedPrivate?.email || '',
+    }).catch((syncErr) => {
+      console.warn('Search index sync warning:', syncErr);
+    });
   }
 
-  const [freshPub, freshPriv] = await Promise.all([
-    getDoc(userRef).catch((e) => handleFirestoreError(e, OperationType.GET, `users/${user.uid}`)),
-    getDoc(privateRef).catch((e) => handleFirestoreError(e, OperationType.GET, `users/${user.uid}/private/info`)),
-  ]);
+  void warmPublicDirectoryCache();
 
   return {
-    publicProfile: freshPub.data() as UserPublicProfile,
-    privateInfo: freshPriv.data() as UserPrivateInfo,
+    publicProfile: resolvedPublic,
+    privateInfo: resolvedPrivate,
   };
+}
+
+export async function removeUserSearchBuckets(uid: string): Promise<void> {
+  if (typeof window === 'undefined' || !uid || !LIMITS.ID_PATTERN.test(uid)) return;
+  try {
+    const raw = localStorage.getItem(`${SEARCH_CACHE_KEY_PREFIX}${uid}`);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as { prefixes?: string[] };
+    if (Array.isArray(parsed.prefixes)) {
+      const batch = writeBatch(db);
+      let count = 0;
+      for (const p of parsed.prefixes) {
+        if (typeof p === 'string' && LIMITS.ID_PATTERN.test(p) && p.length >= 3) {
+          batch.delete(doc(db, 'search_buckets', p, 'users', uid));
+          prefixBucketCache.delete(p);
+          count += 1;
+        }
+      }
+      if (count > 0) await batch.commit();
+    }
+    localStorage.removeItem(`${SEARCH_CACHE_KEY_PREFIX}${uid}`);
+  } catch {
+    // Non-fatal cleanup
+  }
 }
 
 export async function updateUserSettings(params: {
@@ -321,6 +385,8 @@ export async function updateUserSettings(params: {
   photoUrl: string;
   language: AppLanguage;
   showOnlineStatus?: boolean;
+  searchable?: boolean;
+  readReceiptsEnabled?: boolean;
 }): Promise<void> {
   const cleanName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
   const cleanBio = sanitizeStr(params.bio, LIMITS.BIO_MAX);
@@ -339,13 +405,20 @@ export async function updateUserSettings(params: {
   if (typeof params.showOnlineStatus === 'boolean') {
     userUpdates.showOnlineStatus = params.showOnlineStatus;
   }
+  if (typeof params.searchable === 'boolean') {
+    userUpdates.searchable = params.searchable;
+  }
   batch.update(userRef, userUpdates);
 
-  batch.update(privateRef, {
+  const privUpdates: Record<string, unknown> = {
     phoneNumber: '',
     language: params.language,
     updatedAt: serverTimestamp(),
-  });
+  };
+  if (typeof params.readReceiptsEnabled === 'boolean') {
+    privUpdates.readReceiptsEnabled = params.readReceiptsEnabled;
+  }
+  batch.update(privateRef, privUpdates);
 
   // Update email directory display name if email exists
   if (params.email) {
@@ -370,6 +443,185 @@ export async function updateUserSettings(params: {
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, `users/${params.uid}`);
   }
+
+  if (params.searchable === false) {
+    void removeUserSearchBuckets(params.uid);
+  } else {
+    void syncUserSearchBuckets({
+      uid: params.uid,
+      displayName: cleanName,
+      photoUrl: cleanPhoto,
+      bio: cleanBio,
+      maskedEmail: params.email ? maskEmail(normalizeEmail(params.email)) : '',
+      email: params.email ? normalizeEmail(params.email) : '',
+      force: true,
+    }).catch((syncErr) => {
+      console.warn('Search index sync warning:', syncErr);
+    });
+  }
+}
+
+export async function updatePinnedChats(params: {
+  uid: string;
+  pinnedChatIds: string[];
+}): Promise<void> {
+  if (!params.uid || !LIMITS.ID_PATTERN.test(params.uid)) return;
+  const seen = new Set<string>();
+  const cleanIds: string[] = [];
+  for (const rawId of params.pinnedChatIds) {
+    if (typeof rawId !== 'string') continue;
+    const trimmed = rawId.trim();
+    if (!trimmed || trimmed.length > LIMITS.ID_MAX || !LIMITS.ID_PATTERN.test(trimmed)) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    cleanIds.push(trimmed);
+    if (cleanIds.length >= LIMITS.PINNED_CHATS_MAX) break;
+  }
+
+  const privateRef = doc(db, 'users', params.uid, 'private', 'info');
+  try {
+    await updateDoc(privateRef, {
+      pinnedChatIds: cleanIds,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `users/${params.uid}/private/info`);
+  }
+}
+
+export async function updateBlockedUsers(params: {
+  uid: string;
+  blockedUids: string[];
+}): Promise<void> {
+  if (!params.uid || !LIMITS.ID_PATTERN.test(params.uid)) return;
+  const seen = new Set<string>();
+  const cleanIds: string[] = [];
+  for (const rawId of params.blockedUids) {
+    if (typeof rawId !== 'string') continue;
+    const trimmed = rawId.trim();
+    if (!trimmed || trimmed === params.uid || trimmed.length > LIMITS.ID_MAX || !LIMITS.ID_PATTERN.test(trimmed)) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    cleanIds.push(trimmed);
+    if (cleanIds.length >= LIMITS.BLOCKED_USERS_MAX) break;
+  }
+
+  const privateRef = doc(db, 'users', params.uid, 'private', 'info');
+  try {
+    await updateDoc(privateRef, {
+      blockedUids: cleanIds,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `users/${params.uid}/private/info`);
+  }
+}
+
+export async function acceptPolicyVersion(params: {
+  uid: string;
+  version?: string;
+}): Promise<void> {
+  if (!params.uid || !LIMITS.ID_PATTERN.test(params.uid)) return;
+  const safeVersion = sanitizeStr(params.version || CURRENT_POLICY_VERSION, LIMITS.POLICY_VERSION_MAX) || CURRENT_POLICY_VERSION;
+  const privateRef = doc(db, 'users', params.uid, 'private', 'info');
+  try {
+    await updateDoc(privateRef, {
+      acceptedPolicyVersion: safeVersion,
+      acceptedPolicyAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `users/${params.uid}/private/info`);
+  }
+}
+
+export async function submitUserReport(params: {
+  reporterUid: string;
+  reportedUid: string;
+  chatId?: string;
+  reason: ReportReason;
+  details?: string;
+}): Promise<string> {
+  if (!params.reporterUid || !LIMITS.ID_PATTERN.test(params.reporterUid)) {
+    throw new Error('Authentication required.');
+  }
+  if (!params.reportedUid || !LIMITS.ID_PATTERN.test(params.reportedUid) || params.reportedUid === params.reporterUid) {
+    throw new Error('Invalid target account.');
+  }
+  const cleanChatId = params.chatId && LIMITS.ID_PATTERN.test(params.chatId)
+    ? params.chatId.slice(0, LIMITS.ID_MAX)
+    : '';
+  const cleanDetails = sanitizeStr(params.details || '', LIMITS.REPORT_DETAILS_MAX);
+  const reportRef = doc(collection(db, 'reports'));
+  try {
+    await setDoc(reportRef, {
+      id: reportRef.id,
+      reporterUid: params.reporterUid,
+      reportedUid: params.reportedUid,
+      chatId: cleanChatId,
+      reason: params.reason,
+      details: cleanDetails,
+      status: 'open',
+      createdAt: serverTimestamp(),
+    });
+    return reportRef.id;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `reports/${reportRef.id}`);
+  }
+}
+
+export function exportMyUserData(params: {
+  publicProfile: UserPublicProfile;
+  privateInfo: UserPrivateInfo;
+  chats: ChatRoom[];
+  statuses: UserStatus[];
+}): void {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    app: 'KothaLink',
+    policyVersion: params.privateInfo.acceptedPolicyVersion || CURRENT_POLICY_VERSION,
+    account: {
+      uid: params.publicProfile.uid,
+      displayName: params.publicProfile.displayName,
+      bio: params.publicProfile.bio,
+      email: params.privateInfo.email,
+      language: params.privateInfo.language,
+      showOnlineStatus: params.publicProfile.showOnlineStatus !== false,
+      searchable: params.publicProfile.searchable !== false,
+      readReceiptsEnabled: params.privateInfo.readReceiptsEnabled !== false,
+      pinnedChatIds: params.privateInfo.pinnedChatIds || [],
+      blockedUids: params.privateInfo.blockedUids || [],
+    },
+    conversations: params.chats.map((c) => ({
+      id: c.id,
+      channel: c.channel,
+      title: c.title,
+      peerName: c.peerName,
+      lastMessageText: c.lastMessageText,
+      lastMessageAt: c.lastMessageAt?.toDate?.()?.toISOString?.() || null,
+      createdAt: c.createdAt?.toDate?.()?.toISOString?.() || null,
+    })),
+    activeStatuses: params.statuses
+      .filter((s) => s.uid === params.publicProfile.uid)
+      .map((s) => ({
+        id: s.id,
+        mediaType: s.mediaType,
+        text: s.text,
+        createdAt: s.createdAt?.toDate?.()?.toISOString?.() || null,
+        expiresAt: s.expiresAt?.toDate?.()?.toISOString?.() || null,
+      })),
+  };
+
+  const jsonStr = JSON.stringify(payload, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `kothalink-my-data-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export async function updateUserPresence(
@@ -386,6 +638,636 @@ export async function updateUserPresence(
   } catch {
     // Presence heartbeat is best-effort; ignore transient network/unmount issues
   }
+}
+
+const SEARCH_BUCKET_TTL_MS = 60_000;
+const PUBLIC_DIRECTORY_TTL_MS = 60_000;
+const LIVE_PROFILE_TTL_MS = 30_000;
+const SEARCH_CACHE_KEY_PREFIX = 'kl_search_idx_v2_';
+
+const prefixBucketCache = new Map<string, { fetchedAt: number; entries: UserSearchEntry[] }>();
+const inflightBucketQueries = new Map<string, Promise<UserSearchEntry[]>>();
+const liveProfileCache = new Map<string, { fetchedAt: number; profile: UserPublicProfile }>();
+let publicDirectoryCache: { fetchedAt: number; users: UserPublicProfile[] } | null = null;
+let inflightDirectoryQuery: Promise<UserPublicProfile[]> | null = null;
+
+export function encodeSearchPrefix3(rawToken: string): string | null {
+  const cleaned = rawToken.trim().toLowerCase().replace(/^[^a-z0-9\p{L}\p{N}]+/u, '');
+  const chars = Array.from(cleaned);
+  if (chars.length < 3) return null;
+  const p3 = chars.slice(0, 3).join('');
+  if (/^[a-z0-9]{3}$/.test(p3)) {
+    return p3;
+  }
+  const bytes = new TextEncoder().encode(p3);
+  let hex = '';
+  for (const b of bytes) {
+    hex += b.toString(16).padStart(2, '0');
+  }
+  const encoded = `u_${hex}`;
+  if (encoded.length < 3 || encoded.length > LIMITS.SEARCH_PREFIX_MAX || !LIMITS.ID_PATTERN.test(encoded)) {
+    return null;
+  }
+  return encoded;
+}
+
+function buildUserSearchMetadata(params: {
+  displayName: string;
+  email?: string;
+}): { prefixes: string[]; searchTerms: string[] } {
+  const cleanName = params.displayName.trim().toLowerCase();
+  const nameWords = cleanName.split(/[\s._-]+/).filter(Boolean);
+  const collapsedName = cleanName.replace(/[^a-z0-9\p{L}\p{N}]/gu, '');
+
+  const localPart = params.email ? normalizeEmail(params.email).split('@')[0] || '' : '';
+  const emailTokens = localPart ? localPart.split(/[._-]+/).filter(Boolean) : [];
+
+  const prefixSet = new Set<string>();
+  const addPrefixFrom = (tok: string) => {
+    const p = encodeSearchPrefix3(tok);
+    if (p) prefixSet.add(p);
+  };
+
+  addPrefixFrom(cleanName);
+  if (collapsedName.length >= 3) addPrefixFrom(collapsedName);
+  nameWords.forEach(addPrefixFrom);
+  emailTokens.forEach(addPrefixFrom);
+
+  const prefixes = Array.from(prefixSet).slice(0, 6);
+
+  // Store displayName tokens + only safe 6-char prefixes of email tokens (never expose full email)
+  const termSet = new Set<string>();
+  if (cleanName) termSet.add(cleanName.slice(0, 80));
+  if (collapsedName.length >= 2) termSet.add(collapsedName.slice(0, 80));
+  for (const w of nameWords) {
+    if (w.length >= 2) termSet.add(w.slice(0, 80));
+  }
+  for (const et of emailTokens) {
+    if (et.length >= 3) termSet.add(et.slice(0, 6));
+  }
+  if (termSet.size === 0) {
+    termSet.add('user');
+  }
+
+  return {
+    prefixes,
+    searchTerms: Array.from(termSet).slice(0, LIMITS.SEARCH_TERMS_MAX),
+  };
+}
+
+export async function syncUserSearchBuckets(params: {
+  uid: string;
+  displayName: string;
+  photoUrl: string;
+  bio: string;
+  maskedEmail: string;
+  email?: string;
+  force?: boolean;
+}): Promise<void> {
+  if (!params.uid || !LIMITS.ID_PATTERN.test(params.uid)) return;
+  const cleanName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
+  const cleanPhoto = sanitizeStr(params.photoUrl, LIMITS.PHOTO_URL_MAX);
+  const cleanBio = sanitizeStr(params.bio, LIMITS.BIO_MAX);
+  const cleanMasked = sanitizeStr(params.maskedEmail, LIMITS.EMAIL_MAX);
+
+  const { prefixes, searchTerms } = buildUserSearchMetadata({
+    displayName: cleanName,
+    email: params.email,
+  });
+  if (prefixes.length === 0) return;
+
+  const sig = JSON.stringify([cleanName, cleanPhoto, cleanBio, cleanMasked, prefixes, searchTerms]);
+  let prevPrefixes: string[] = [];
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(`${SEARCH_CACHE_KEY_PREFIX}${params.uid}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { sig?: string; prefixes?: string[] };
+        if (Array.isArray(parsed.prefixes)) {
+          prevPrefixes = parsed.prefixes;
+        }
+        if (!params.force && parsed.sig === sig) {
+          return;
+        }
+      }
+    } catch {
+      // Ignore storage parse error
+    }
+  }
+
+  const batch = writeBatch(db);
+  for (const prefix of prefixes) {
+    batch.set(doc(db, 'search_buckets', prefix, 'users', params.uid), {
+      uid: params.uid,
+      prefix,
+      displayName: cleanName,
+      photoUrl: cleanPhoto,
+      bio: cleanBio,
+      maskedEmail: cleanMasked,
+      searchTerms,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  for (const oldPrefix of prevPrefixes) {
+    if (!prefixes.includes(oldPrefix) && LIMITS.ID_PATTERN.test(oldPrefix) && oldPrefix.length >= 3) {
+      batch.delete(doc(db, 'search_buckets', oldPrefix, 'users', params.uid));
+    }
+  }
+
+  await batch.commit();
+
+  // Invalidate local bucket cache for updated prefixes so user sees fresh info immediately
+  for (const p of prefixes) {
+    prefixBucketCache.delete(p);
+  }
+
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(
+        `${SEARCH_CACHE_KEY_PREFIX}${params.uid}`,
+        JSON.stringify({ sig, prefixes })
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+}
+
+async function fetchSearchBucket(prefix3: string): Promise<UserSearchEntry[]> {
+  const cached = prefixBucketCache.get(prefix3);
+  if (cached && Date.now() - cached.fetchedAt < SEARCH_BUCKET_TTL_MS) {
+    return cached.entries;
+  }
+
+  const existingInflight = inflightBucketQueries.get(prefix3);
+  if (existingInflight) {
+    return existingInflight;
+  }
+
+  const req = (async () => {
+    try {
+      const snap = await getDocs(
+        query(
+          collection(db, 'search_buckets', prefix3, 'users'),
+          where('prefix', '==', prefix3),
+          limit(LIMITS.SEARCH_BUCKET_LIMIT)
+        )
+      );
+      const entries = snap.docs.map((d) => d.data() as UserSearchEntry);
+      prefixBucketCache.set(prefix3, { fetchedAt: Date.now(), entries });
+      return entries;
+    } catch (err) {
+      console.warn(`Search bucket query failed for "${prefix3}":`, err);
+      return [];
+    } finally {
+      inflightBucketQueries.delete(prefix3);
+    }
+  })();
+
+  inflightBucketQueries.set(prefix3, req);
+  return req;
+}
+
+function buildCaseVariants(rawToken: string): string[] {
+  const clean = rawToken.trim();
+  if (!clean) return [];
+  const lower = clean.toLowerCase();
+  const title = clean
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
+  const upperFirst = clean.charAt(0).toUpperCase() + clean.slice(1);
+  return Array.from(new Set([clean, title, lower, upperFirst])).slice(0, 3);
+}
+
+async function fetchPublicUsersDirectory(): Promise<UserPublicProfile[]> {
+  if (publicDirectoryCache && Date.now() - publicDirectoryCache.fetchedAt < PUBLIC_DIRECTORY_TTL_MS) {
+    return publicDirectoryCache.users;
+  }
+  if (inflightDirectoryQuery) {
+    return inflightDirectoryQuery;
+  }
+  const req = (async () => {
+    try {
+      const snap = await getDocs(
+        query(
+          collection(db, 'users'),
+          where('displayName', '>=', ''),
+          limit(100)
+        )
+      );
+      const now = Date.now();
+      const users = snap.docs
+        .map((d) => d.data() as UserPublicProfile)
+        .filter((u) => Boolean(u && u.uid && u.displayName && u.searchable !== false));
+      for (const prof of users) {
+        liveProfileCache.set(prof.uid, { fetchedAt: now, profile: prof });
+      }
+      publicDirectoryCache = { fetchedAt: now, users };
+      return users;
+    } catch (err) {
+      console.warn('Public directory fallback query failed:', err);
+      return publicDirectoryCache?.users || [];
+    } finally {
+      inflightDirectoryQuery = null;
+    }
+  })();
+  inflightDirectoryQuery = req;
+  return req;
+}
+
+export async function warmPublicDirectoryCache(): Promise<void> {
+  await fetchPublicUsersDirectory().catch(() => {});
+}
+
+async function fetchUsersByDisplayNamePrefix(rawQuery: string): Promise<UserPublicProfile[]> {
+  const clean = rawQuery.trim();
+  if (Array.from(clean).length < 2) return [];
+  const firstWord = clean.split(/\s+/).filter(Boolean)[0] || clean;
+  const variants = buildCaseVariants(firstWord.slice(0, 24));
+  if (variants.length === 0) return [];
+
+  const settled = await Promise.allSettled(
+    variants.map((variant) =>
+      getDocs(
+        query(
+          collection(db, 'users'),
+          where('displayName', '>=', variant),
+          where('displayName', '<=', `${variant}\uf8ff`),
+          limit(25)
+        )
+      )
+    )
+  );
+
+  const now = Date.now();
+  const byUid = new Map<string, UserPublicProfile>();
+  for (const res of settled) {
+    if (res.status !== 'fulfilled') continue;
+    for (const d of res.value.docs) {
+      const prof = d.data() as UserPublicProfile;
+      if (!prof || !prof.uid || !prof.displayName) continue;
+      byUid.set(prof.uid, prof);
+      liveProfileCache.set(prof.uid, { fetchedAt: now, profile: prof });
+    }
+  }
+  return Array.from(byUid.values());
+}
+
+function scoreSearchCandidate(
+  candidate: {
+    displayName: string;
+    bio: string;
+    maskedEmail: string;
+    searchTerms: string[];
+  },
+  fullQueryLower: string,
+  queryWords: string[],
+  isKnownLocal: boolean
+): number {
+  const nameLower = (candidate.displayName || '').toLowerCase();
+  const collapsedName = nameLower.replace(/[^a-z0-9\p{L}\p{N}]/gu, '');
+  const collapsedQuery = fullQueryLower.replace(/[^a-z0-9\p{L}\p{N}]/gu, '');
+  const bioLower = (candidate.bio || '').toLowerCase();
+  const maskedLower = (candidate.maskedEmail || '').toLowerCase();
+  const nameWords = nameLower.split(/[\s._-]+/).filter(Boolean);
+  const termsLower = candidate.searchTerms.map((s) => s.toLowerCase());
+
+  // Every meaningful query token (>= 2 chars) must match at least one surface
+  for (const qw of queryWords) {
+    if (qw.length < 2) continue;
+    const matchesWord =
+      nameLower.includes(qw) ||
+      (collapsedName.length >= 2 && collapsedName.includes(qw)) ||
+      termsLower.some((t) => t.startsWith(qw) || t.includes(qw) || (t.length >= 6 && qw.startsWith(t))) ||
+      maskedLower.startsWith(qw) ||
+      bioLower.includes(qw);
+    if (!matchesWord) return 0;
+  }
+
+  let score = 0;
+  if (nameLower === fullQueryLower) score += 130;
+  else if (nameLower.startsWith(fullQueryLower)) score += 100;
+  else if (collapsedQuery.length >= 3 && collapsedName.startsWith(collapsedQuery)) score += 88;
+
+  const firstToken = queryWords[0] || fullQueryLower;
+  if (nameWords.some((nw) => nw.startsWith(firstToken))) score += 75;
+  if (termsLower.some((t) => t.startsWith(firstToken))) score += 60;
+  if (maskedLower.startsWith(firstToken.slice(0, 2))) score += 15;
+  if (nameLower.includes(fullQueryLower)) score += 35;
+  if (bioLower.includes(fullQueryLower)) score += 15;
+  if (score === 0 && queryWords.length > 0) score = 20;
+  if (isKnownLocal) score += 8;
+
+  return score;
+}
+
+export function getInstantLocalUserMatches(params: {
+  queryText: string;
+  currentUid: string;
+  knownProfiles?: Record<string, UserPublicProfile>;
+  blockedUids?: string[];
+}): UserSearchResult[] {
+  const fullQueryLower = params.queryText.trim().toLowerCase();
+  if (fullQueryLower.length < 2) return [];
+  const blockedSet = new Set(params.blockedUids || []);
+  const queryWords = fullQueryLower.split(/[\s._-]+/).filter(Boolean);
+  const known = params.knownProfiles || {};
+  const results = new Map<string, UserSearchResult>();
+
+  // 1. Synchronous check against already-loaded peer profiles
+  for (const prof of Object.values(known)) {
+    if (!prof || prof.uid === params.currentUid || blockedSet.has(prof.uid) || prof.searchable === false) continue;
+    const score = scoreSearchCandidate(
+      {
+        displayName: prof.displayName,
+        bio: prof.bio || '',
+        maskedEmail: prof.maskedEmail || '',
+        searchTerms: [prof.displayName],
+      },
+      fullQueryLower,
+      queryWords,
+      true
+    );
+    if (score > 0) {
+      results.set(prof.uid, {
+        uid: prof.uid,
+        displayName: prof.displayName,
+        photoUrl: prof.photoUrl || '',
+        bio: prof.bio || '',
+        maskedEmail: prof.maskedEmail || '',
+        onlineStatus: prof.onlineStatus,
+        lastSeenAt: prof.lastSeenAt,
+        showOnlineStatus: prof.showOnlineStatus,
+        score,
+      });
+    }
+  }
+
+  // 2. Synchronous check against warm in-memory public directory cache
+  if (publicDirectoryCache) {
+    for (const prof of publicDirectoryCache.users) {
+      if (!prof || prof.uid === params.currentUid || blockedSet.has(prof.uid) || prof.searchable === false) continue;
+      const score = scoreSearchCandidate(
+        {
+          displayName: prof.displayName,
+          bio: prof.bio || '',
+          maskedEmail: prof.maskedEmail || '',
+          searchTerms: [prof.displayName],
+        },
+        fullQueryLower,
+        queryWords,
+        Boolean(known[prof.uid])
+      );
+      if (score > 0) {
+        const existing = results.get(prof.uid);
+        if (!existing || score > existing.score) {
+          results.set(prof.uid, {
+            uid: prof.uid,
+            displayName: prof.displayName,
+            photoUrl: prof.photoUrl || '',
+            bio: prof.bio || '',
+            maskedEmail: prof.maskedEmail || '',
+            onlineStatus: prof.onlineStatus,
+            lastSeenAt: prof.lastSeenAt,
+            showOnlineStatus: prof.showOnlineStatus,
+            score,
+          });
+        }
+      }
+    }
+  }
+
+  // 3. Synchronous check against any warm in-memory 3-letter bucket cache
+  const primaryToken =
+    queryWords.find((w) => Array.from(w).length >= 3) ||
+    fullQueryLower.replace(/[^a-z0-9\p{L}\p{N}]/gu, '');
+  const prefix3 = primaryToken ? encodeSearchPrefix3(primaryToken) : null;
+  if (prefix3) {
+    const cached = prefixBucketCache.get(prefix3);
+    if (cached) {
+      for (const entry of cached.entries) {
+        if (!entry || entry.uid === params.currentUid || blockedSet.has(entry.uid)) continue;
+        const score = scoreSearchCandidate(
+          {
+            displayName: entry.displayName,
+            bio: entry.bio || '',
+            maskedEmail: entry.maskedEmail || '',
+            searchTerms: Array.isArray(entry.searchTerms) ? entry.searchTerms : [],
+          },
+          fullQueryLower,
+          queryWords,
+          Boolean(known[entry.uid])
+        );
+        if (score > 0) {
+          const existing = results.get(entry.uid);
+          const liveProf = known[entry.uid] || liveProfileCache.get(entry.uid)?.profile;
+          if (!existing || score > existing.score) {
+            results.set(entry.uid, {
+              uid: entry.uid,
+              displayName: liveProf?.displayName || entry.displayName,
+              photoUrl: liveProf?.photoUrl || entry.photoUrl || '',
+              bio: liveProf?.bio || entry.bio || '',
+              maskedEmail: liveProf?.maskedEmail || entry.maskedEmail || '',
+              onlineStatus: liveProf?.onlineStatus,
+              lastSeenAt: liveProf?.lastSeenAt,
+              showOnlineStatus: liveProf?.showOnlineStatus,
+              score,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(results.values())
+    .sort((a, b) => b.score - a.score || a.displayName.localeCompare(b.displayName))
+    .slice(0, 15);
+}
+
+export async function searchUserProfiles(params: {
+  queryText: string;
+  currentUid: string;
+  knownProfiles?: Record<string, UserPublicProfile>;
+  blockedUids?: string[];
+}): Promise<UserSearchResult[]> {
+  const fullQueryLower = params.queryText.trim().toLowerCase();
+  const blockedSet = new Set(params.blockedUids || []);
+  if (Array.from(fullQueryLower).length < 3) {
+    return getInstantLocalUserMatches(params);
+  }
+
+  const queryWords = fullQueryLower.split(/[\s._-]+/).filter(Boolean);
+  const primaryToken =
+    queryWords.find((w) => Array.from(w).length >= 3) ||
+    fullQueryLower.replace(/[^a-z0-9\p{L}\p{N}]/gu, '');
+  const prefix3 = primaryToken ? encodeSearchPrefix3(primaryToken) : null;
+
+  const isExactEmailLike = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(fullQueryLower);
+  const [bucketEntries, prefixUsers, directoryUsers, emailMatch] = await Promise.all([
+    prefix3 ? fetchSearchBucket(prefix3) : Promise.resolve([] as UserSearchEntry[]),
+    fetchUsersByDisplayNamePrefix(params.queryText),
+    fetchPublicUsersDirectory(),
+    isExactEmailLike
+      ? (async (): Promise<UserPublicProfile | null> => {
+          try {
+            const hash = await sha256Hex(normalizeEmail(fullQueryLower));
+            const dirSnap = await getDoc(doc(db, 'email_directory', hash));
+            if (!dirSnap.exists()) return null;
+            const entry = dirSnap.data() as DirectoryEntry;
+            if (!entry?.uid || entry.uid === params.currentUid || blockedSet.has(entry.uid)) return null;
+            const pubSnap = await getDoc(doc(db, 'users', entry.uid));
+            if (pubSnap.exists()) {
+              const prof = pubSnap.data() as UserPublicProfile;
+              liveProfileCache.set(prof.uid, { fetchedAt: Date.now(), profile: prof });
+              return prof;
+            }
+            return {
+              uid: entry.uid,
+              displayName: entry.displayName,
+              photoUrl: entry.photoUrl,
+              bio: '',
+              maskedEmail: maskEmail(fullQueryLower),
+              hasPhone: false,
+              onlineStatus: 'offline',
+              lastSeenAt: null,
+              createdAt: null,
+              updatedAt: null,
+            };
+          } catch {
+            return null;
+          }
+        })()
+      : Promise.resolve(null),
+  ]);
+
+  const known = params.knownProfiles || {};
+  const merged = new Map<string, UserSearchResult>();
+
+  // 1. Local known profiles
+  for (const item of getInstantLocalUserMatches(params)) {
+    merged.set(item.uid, item);
+  }
+
+  // 2. Exact email match (highest priority if matched and not blocked/hidden)
+  if (emailMatch && emailMatch.uid !== params.currentUid && !blockedSet.has(emailMatch.uid) && emailMatch.searchable !== false) {
+    merged.set(emailMatch.uid, {
+      uid: emailMatch.uid,
+      displayName: emailMatch.displayName,
+      photoUrl: emailMatch.photoUrl || '',
+      bio: emailMatch.bio || '',
+      maskedEmail: emailMatch.maskedEmail || maskEmail(fullQueryLower),
+      onlineStatus: emailMatch.onlineStatus,
+      lastSeenAt: emailMatch.lastSeenAt,
+      showOnlineStatus: emailMatch.showOnlineStatus,
+      score: 200,
+    });
+  }
+
+  // 3. Direct /users matches (prefix range queries + cached public directory for existing/legacy users)
+  for (const prof of [...prefixUsers, ...directoryUsers]) {
+    if (!prof || prof.uid === params.currentUid || blockedSet.has(prof.uid) || prof.searchable === false) continue;
+    const score = scoreSearchCandidate(
+      {
+        displayName: prof.displayName,
+        bio: prof.bio || '',
+        maskedEmail: prof.maskedEmail || '',
+        searchTerms: [prof.displayName],
+      },
+      fullQueryLower,
+      queryWords,
+      Boolean(known[prof.uid])
+    );
+    if (score > 0) {
+      const existing = merged.get(prof.uid);
+      if (!existing || score >= existing.score) {
+        merged.set(prof.uid, {
+          uid: prof.uid,
+          displayName: prof.displayName,
+          photoUrl: prof.photoUrl || '',
+          bio: prof.bio || '',
+          maskedEmail: prof.maskedEmail || '',
+          onlineStatus: prof.onlineStatus,
+          lastSeenAt: prof.lastSeenAt,
+          showOnlineStatus: prof.showOnlineStatus,
+          score,
+        });
+      }
+    }
+  }
+
+  // 4. Bucket entries (catches Gmail local-part prefixes, multi-word & Unicode tokens)
+  for (const entry of bucketEntries) {
+    if (!entry || entry.uid === params.currentUid || blockedSet.has(entry.uid)) continue;
+    const livePref = known[entry.uid] || liveProfileCache.get(entry.uid)?.profile;
+    if (livePref && livePref.searchable === false) continue;
+    const score = scoreSearchCandidate(
+      {
+        displayName: entry.displayName,
+        bio: entry.bio || '',
+        maskedEmail: entry.maskedEmail || '',
+        searchTerms: Array.isArray(entry.searchTerms) ? entry.searchTerms : [],
+      },
+      fullQueryLower,
+      queryWords,
+      Boolean(known[entry.uid])
+    );
+    if (score > 0) {
+      const existing = merged.get(entry.uid);
+      const liveProf = known[entry.uid] || liveProfileCache.get(entry.uid)?.profile;
+      if (!existing || score > existing.score) {
+        merged.set(entry.uid, {
+          uid: entry.uid,
+          displayName: liveProf?.displayName || entry.displayName,
+          photoUrl: liveProf?.photoUrl || entry.photoUrl || '',
+          bio: liveProf?.bio || entry.bio || '',
+          maskedEmail: liveProf?.maskedEmail || entry.maskedEmail || '',
+          onlineStatus: liveProf?.onlineStatus,
+          lastSeenAt: liveProf?.lastSeenAt,
+          showOnlineStatus: liveProf?.showOnlineStatus,
+          score,
+        });
+      }
+    }
+  }
+
+  return Array.from(merged.values())
+    .sort((a, b) => b.score - a.score || a.displayName.localeCompare(b.displayName))
+    .slice(0, 15);
+}
+
+export async function hydrateSearchResultProfiles(
+  uids: string[]
+): Promise<Record<string, UserPublicProfile>> {
+  const now = Date.now();
+  const out: Record<string, UserPublicProfile> = {};
+  const toFetch: string[] = [];
+
+  for (const uid of uids.slice(0, 8)) {
+    if (!uid || !LIMITS.ID_PATTERN.test(uid)) continue;
+    const cached = liveProfileCache.get(uid);
+    if (cached && now - cached.fetchedAt < LIVE_PROFILE_TTL_MS) {
+      out[uid] = cached.profile;
+    } else {
+      toFetch.push(uid);
+    }
+  }
+
+  if (toFetch.length > 0) {
+    const snaps = await Promise.allSettled(toFetch.map((uid) => getDoc(doc(db, 'users', uid))));
+    snaps.forEach((res, idx) => {
+      const uid = toFetch[idx];
+      if (res.status === 'fulfilled' && res.value.exists()) {
+        const prof = res.value.data() as UserPublicProfile;
+        liveProfileCache.set(uid, { fetchedAt: Date.now(), profile: prof });
+        out[uid] = prof;
+      }
+    });
+  }
+
+  return out;
 }
 
 export function subscribeUserProfiles(
@@ -513,6 +1395,62 @@ function findExistingPendingChat(
       c.targetHint === targetHint &&
       Boolean(c.inviteCode)
   );
+}
+
+export async function startChatByUserProfile(params: {
+  currentUser: UserPublicProfile;
+  target: Pick<UserSearchResult, 'uid' | 'displayName' | 'maskedEmail'>;
+  existingChats: ChatRoom[];
+}): Promise<string> {
+  if (!params.target.uid || params.target.uid === params.currentUser.uid) {
+    throw new Error('Cannot start a chat with yourself.');
+  }
+
+  const existingLocal = findExistingDirectChat(
+    params.existingChats,
+    params.currentUser.uid,
+    params.target.uid
+  );
+  if (existingLocal) {
+    return existingLocal.id;
+  }
+
+  const sorted = [params.currentUser.uid, params.target.uid].sort();
+  const existingRemote = await findExistingDirectChatOnServer(sorted);
+  if (existingRemote) {
+    return existingRemote.id;
+  }
+
+  const chatId = `dm_${sorted[0]}_${sorted[1]}`.slice(0, LIMITS.ID_MAX);
+  const peerLabel = sanitizeStr(params.target.displayName, LIMITS.CHAT_TITLE_MAX) || 'Friend';
+  const creatorLabel = sanitizeStr(params.currentUser.displayName, LIMITS.DISPLAY_NAME_MAX) || 'User';
+  const targetHint = sanitizeStr(
+    params.target.maskedEmail || peerLabel,
+    LIMITS.TARGET_HINT_MAX
+  );
+
+  try {
+    await setDoc(doc(db, 'chats', chatId), {
+      id: chatId,
+      channel: 'gmail' as ChatChannel,
+      title: peerLabel,
+      targetHint,
+      creatorId: params.currentUser.uid,
+      creatorName: creatorLabel,
+      peerName: sanitizeStr(peerLabel, LIMITS.DISPLAY_NAME_MAX) || 'Friend',
+      participantIds: sorted,
+      inviteCode: '',
+      lastMessageText: 'Connected on KothaLink',
+      lastMessageSenderId: params.currentUser.uid,
+      lastMessageAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `chats/${chatId}`);
+  }
+
+  return chatId;
 }
 
 export async function startChatByGmail(params: {
@@ -1039,31 +1977,36 @@ export async function markChatMessagesDelivered(
 export async function markChatMessagesSeen(
   chatId: string,
   currentUid: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  readReceiptsEnabled = true
 ): Promise<void> {
   if (!chatId || !currentUid || messages.length === 0) return;
   const pending = messages.filter((m) => {
     if (m.optimistic || m.senderId === currentUid) return false;
-    if (m.readAt && m.deliveredAt) return false;
-    const key = `${chatId}:${m.id}`;
+    const needsDelivered = !m.deliveredAt;
+    const needsRead = readReceiptsEnabled && !m.readAt;
+    if (!needsDelivered && !needsRead) return false;
+    const key = `${chatId}:${m.id}:${readReceiptsEnabled ? 'r' : 'd'}`;
     return !seenStampInFlight.has(key);
   });
   if (pending.length === 0) return;
 
-  pending.forEach((m) => seenStampInFlight.add(`${chatId}:${m.id}`));
+  pending.forEach((m) => seenStampInFlight.add(`${chatId}:${m.id}:${readReceiptsEnabled ? 'r' : 'd'}`));
   try {
     for (let i = 0; i < pending.length; i += 200) {
       const batch = writeBatch(db);
       pending.slice(i, i + 200).forEach((m) => {
         const updates: Record<string, unknown> = {};
         if (!m.deliveredAt) updates.deliveredAt = serverTimestamp();
-        if (!m.readAt) updates.readAt = serverTimestamp();
-        batch.update(doc(db, 'chats', chatId, 'messages', m.id), updates);
+        if (readReceiptsEnabled && !m.readAt) updates.readAt = serverTimestamp();
+        if (Object.keys(updates).length > 0) {
+          batch.update(doc(db, 'chats', chatId, 'messages', m.id), updates);
+        }
       });
       await batch.commit();
     }
   } catch {
-    pending.forEach((m) => seenStampInFlight.delete(`${chatId}:${m.id}`));
+    pending.forEach((m) => seenStampInFlight.delete(`${chatId}:${m.id}:${readReceiptsEnabled ? 'r' : 'd'}`));
   }
 }
 
@@ -1207,6 +2150,25 @@ export async function deleteUserAccount(
     await deleteDoc(doc(db, 'users', uid, 'private', 'info'));
   } catch {
     // Ignore if already removed
+  }
+
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(`${SEARCH_CACHE_KEY_PREFIX}${uid}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { prefixes?: string[] };
+        if (Array.isArray(parsed.prefixes)) {
+          await Promise.allSettled(
+            parsed.prefixes
+              .filter((p) => typeof p === 'string' && LIMITS.ID_PATTERN.test(p) && p.length >= 3)
+              .map((p) => deleteDoc(doc(db, 'search_buckets', p, 'users', uid)))
+          );
+        }
+        localStorage.removeItem(`${SEARCH_CACHE_KEY_PREFIX}${uid}`);
+      }
+    } catch {
+      // Continue account deletion
+    }
   }
 
   try {

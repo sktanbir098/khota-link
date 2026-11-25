@@ -351,6 +351,27 @@ export function getApiBaseUrl(): string {
   return raw.trim().replace(/\/+$/, '');
 }
 
+export async function checkOfficialMailerStatus(): Promise<boolean> {
+  try {
+    const apiBase = getApiBaseUrl();
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? window.setTimeout(() => ctrl.abort(), 3200) : null;
+    try {
+      const res = await fetch(`${apiBase}/api/mail-status`, {
+        method: 'GET',
+        signal: ctrl?.signal,
+      });
+      if (!res.ok) return false;
+      const data = (await res.json().catch(() => ({}))) as { configured?: boolean };
+      return Boolean(data?.configured);
+    } finally {
+      if (timer !== null) window.clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+}
+
 export async function sendGmailAlertEmail(params: {
   to: string;
   senderName: string;
@@ -361,7 +382,11 @@ export async function sendGmailAlertEmail(params: {
 }): Promise<{ mode: 'official' | 'gmail-oauth' }> {
   const toEmail = params.to.trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
-    throw new Error('Please enter a valid Gmail address for this recipient.');
+    throw new Error(
+      params.isBangla
+        ? 'অনুগ্রহ করে প্রাপকের সঠিক Gmail ঠিকানা দিন।'
+        : 'Please enter a valid Gmail address for this recipient.'
+    );
   }
 
   // 1. Try 1-click Official Server / Netlify Function Alert Mailer first
@@ -412,7 +437,25 @@ export async function sendGmailAlertEmail(params: {
   }
 
   // 2. Fallback: Client-side Google Workspace Gmail API
-  let token = await authorizeGmailSend();
+  let token: string;
+  try {
+    token = await authorizeGmailSend();
+  } catch (authErr) {
+    const rawMsg = authErr instanceof Error ? authErr.message : '';
+    const code = (authErr as { code?: string })?.code || '';
+    if (code === 'auth/popup-closed-by-user' || rawMsg.includes('popup-closed')) {
+      throw new Error(
+        params.isBangla
+          ? 'Google ভেরিফিকেশন পপআপ বন্ধ করা হয়েছে — নিচের "Gmail অ্যাপে সরাসরি পাঠান" বাটন দিয়ে সাথে সাথেই পাঠাতে পারেন।'
+          : 'Google sign-in popup was closed. Tap "Send via Gmail" below to send directly.'
+      );
+    }
+    throw new Error(
+      params.isBangla
+        ? '১-ক্লিক সার্ভার মেইলার এখনো সেটআপ নেই — নিচের "Gmail অ্যাপে সরাসরি পাঠান" বাটনে ক্লিক করে এখনই পাঠান।'
+        : '1-click official mailer is not active yet — tap "Send via Gmail" below to send right away.'
+    );
+  }
 
   const { subject, body } = buildGmailAlertContent(params);
 
@@ -452,11 +495,11 @@ export async function sendGmailAlertEmail(params: {
   }
 
   if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg =
-      (errBody as { error?: { message?: string } })?.error?.message ||
-      `Gmail send failed (HTTP ${res.status}).`;
-    throw new Error(msg);
+    throw new Error(
+      params.isBangla
+        ? 'সরাসরি Gmail API দিয়ে পাঠানো যায়নি — নিচের "Gmail অ্যাপে সরাসরি পাঠান" বাটন ব্যবহার করুন।'
+        : 'Could not send via Gmail API — tap "Send via Gmail" below to send directly.'
+    );
   }
 
   return { mode: 'gmail-oauth' };

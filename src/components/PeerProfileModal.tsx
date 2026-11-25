@@ -2,13 +2,17 @@ import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   ArrowLeft,
+  Ban,
   Bell,
   BellOff,
   Check,
   ExternalLink,
+  Flag,
   Loader2,
   Mail,
   Phone,
+  Pin,
+  PinOff,
   Radio,
   Send,
   Sparkles,
@@ -36,11 +40,17 @@ interface Props {
   peerStatuses: UserStatus[];
   isChatMuted: boolean;
   isChatSoundMuted: boolean;
+  isPinned?: boolean;
+  isBlocked?: boolean;
   savedPeerEmail: string;
   viewerEmail?: string;
   autoOfferOfflineGmail: boolean;
+  officialMailerReady?: boolean | null;
   onToggleChatMute: () => void;
   onToggleChatSoundMute: () => void;
+  onTogglePinChat?: () => void;
+  onToggleBlock?: () => Promise<void>;
+  onOpenReport?: () => void;
   onSavePeerEmail: (email: string) => void;
   onToggleAutoOfferOfflineGmail: () => void;
   onSendGmailAlert: (toEmail: string) => Promise<void>;
@@ -62,11 +72,17 @@ export const PeerProfileModal: React.FC<Props> = ({
   peerStatuses,
   isChatMuted,
   isChatSoundMuted,
+  isPinned = false,
+  isBlocked = false,
   savedPeerEmail,
   viewerEmail,
   autoOfferOfflineGmail,
+  officialMailerReady,
   onToggleChatMute,
   onToggleChatSoundMute,
+  onTogglePinChat,
+  onToggleBlock,
+  onOpenReport,
   onSavePeerEmail,
   onToggleAutoOfferOfflineGmail,
   onSendGmailAlert,
@@ -78,6 +94,7 @@ export const PeerProfileModal: React.FC<Props> = ({
 }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [blockingBusy, setBlockingBusy] = useState(false);
   const [emailInput, setEmailInput] = useState(savedPeerEmail);
   const [editingEmail, setEditingEmail] = useState(!savedPeerEmail);
   const [emailSavedFeedback, setEmailSavedFeedback] = useState(false);
@@ -143,15 +160,22 @@ export const PeerProfileModal: React.FC<Props> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+    <div
+      onClick={onClose}
+      className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4"
+    >
       <motion.div
-        initial={{ opacity: 0, scale: 0.95, y: 10 }}
+        initial={{ opacity: 0, scale: 0.97, y: 18 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 8 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl max-h-[90dvh] flex flex-col"
+        exit={{ opacity: 0, scale: 0.97, y: 14 }}
+        transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-2xl max-h-[92dvh] flex flex-col mobile-sheet-safe"
       >
-        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
+        <div className="sm:hidden flex justify-center pt-2.5 pb-0.5 shrink-0">
+          <span className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+        </div>
+        <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
@@ -175,7 +199,7 @@ export const PeerProfileModal: React.FC<Props> = ({
           </button>
         </div>
 
-        <div className="p-6 space-y-5 overflow-y-auto">
+        <div className="p-5 sm:p-6 space-y-5 overflow-y-auto">
           {/* Avatar with Blinking Green Online Ring + Audio/Video Call Quick Buttons */}
           <motion.div
             initial={{ opacity: 0, y: 8 }}
@@ -260,27 +284,44 @@ export const PeerProfileModal: React.FC<Props> = ({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
-            className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center gap-3"
+            className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3"
           >
-            <div className="w-9 h-9 rounded-xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
-              {chat.channel === 'gmail' ? (
-                <Mail className="w-4 h-4" />
-              ) : (
-                <Wifi className="w-4 h-4" />
-              )}
-            </div>
-            <div className="min-w-0">
-              <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                {chat.channel === 'gmail'
-                  ? 'Gmail Chat'
-                  : chat.channel === 'phone'
-                  ? 'Invite Code Chat'
-                  : 'Nearby Direct'}
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                {chat.channel === 'gmail' ? (
+                  <Mail className="w-4 h-4" />
+                ) : (
+                  <Wifi className="w-4 h-4" />
+                )}
               </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
-                {resolvedPeerHint}
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  {chat.channel === 'gmail'
+                    ? 'Gmail Chat'
+                    : chat.channel === 'phone'
+                    ? 'Invite Code Chat'
+                    : 'Nearby Direct'}
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
+                  {resolvedPeerHint}
+                </div>
               </div>
             </div>
+            {onTogglePinChat && (
+              <button
+                type="button"
+                onClick={onTogglePinChat}
+                aria-pressed={isPinned}
+                className={`min-h-[38px] px-3 rounded-xl text-xs font-semibold flex items-center gap-1.5 shrink-0 transition-colors ${
+                  isPinned
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                {isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
+                <span>{isPinned ? t(lang, 'unpinChat') : t(lang, 'pinChat')}</span>
+              </button>
+            )}
           </motion.div>
 
           {/* Per-User Notification Mute & Sound Controls */}
@@ -472,19 +513,40 @@ export const PeerProfileModal: React.FC<Props> = ({
               </button>
             </div>
 
-            <button
-              type="button"
-              disabled={!isEmailValid || sendingAlert}
-              onClick={handleSendAlertNow}
-              className="w-full min-h-[40px] px-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
-            >
-              {sendingAlert ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Send className="w-3.5 h-3.5" />
+            <div className="space-y-2">
+              {officialMailerReady === true && (
+                <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                  ✓ {t(lang, 'officialMailerReadyNote')}
+                </p>
               )}
-              <span>{sendingAlert ? t(lang, 'sendingGmailAlert') : t(lang, 'sendGmailAlertBtn')}</span>
-            </button>
+
+              <button
+                type="button"
+                disabled={!isEmailValid || sendingAlert}
+                onClick={handleSendAlertNow}
+                className="w-full min-h-[42px] px-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+              >
+                {sendingAlert ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Send className="w-3.5 h-3.5" />
+                )}
+                <span>{sendingAlert ? t(lang, 'sendingGmailAlert') : t(lang, 'sendGmailAlertBtn')}</span>
+              </button>
+
+              {isEmailValid && getGmailComposeUrl && officialMailerReady === false && (
+                <a
+                  href={getGmailComposeUrl(trimmedEmail)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => handleSaveEmail()}
+                  className="w-full min-h-[40px] px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/90 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/60 text-blue-700 dark:text-blue-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>{t(lang, 'openGmailAppBtn')}</span>
+                </a>
+              )}
+            </div>
 
             {alertStatusMsg && (
               <div className="space-y-2">
@@ -497,15 +559,15 @@ export const PeerProfileModal: React.FC<Props> = ({
                 >
                   {alertStatusMsg.text}
                 </p>
-                {alertStatusMsg.type === 'err' && isEmailValid && getGmailComposeUrl && (
+                {alertStatusMsg.type === 'err' && isEmailValid && getGmailComposeUrl && officialMailerReady !== false && (
                   <a
                     href={getGmailComposeUrl(trimmedEmail)}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="w-full min-h-[38px] px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/60 text-blue-700 dark:text-blue-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/60 text-blue-700 dark:text-blue-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    <span>{lang === 'bn' ? 'Gmail-এ সরাসরি পাঠান' : 'Open in Gmail'}</span>
+                    <span>{t(lang, 'openGmailAppBtn')}</span>
                   </a>
                 )}
               </div>
@@ -563,6 +625,48 @@ export const PeerProfileModal: React.FC<Props> = ({
               </div>
             )}
           </motion.div>
+
+          {/* Safety Actions: Block & Report */}
+          {(onToggleBlock || onOpenReport) && (
+            <div className="pt-3 border-t border-slate-200 dark:border-slate-800 grid grid-cols-2 gap-2">
+              {onToggleBlock && (
+                <button
+                  type="button"
+                  disabled={blockingBusy}
+                  onClick={async () => {
+                    setBlockingBusy(true);
+                    try {
+                      await onToggleBlock();
+                    } finally {
+                      setBlockingBusy(false);
+                    }
+                  }}
+                  className={`min-h-[42px] px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                    isBlocked
+                      ? 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100'
+                      : 'border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 hover:bg-amber-100'
+                  }`}
+                >
+                  {blockingBusy ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Ban className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span>{isBlocked ? t(lang, 'unblockUserBtn') : t(lang, 'blockUserBtn')}</span>
+                </button>
+              )}
+              {onOpenReport && (
+                <button
+                  type="button"
+                  onClick={onOpenReport}
+                  className="min-h-[42px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+                >
+                  <Flag className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                  <span>{t(lang, 'reportUserBtn')}</span>
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Delete Chat Danger Action */}
           <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">

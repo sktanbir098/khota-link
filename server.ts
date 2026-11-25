@@ -115,7 +115,7 @@ function parseGeminiPayload(body: unknown): {
     modelChoice?: string;
   };
 
-  const trimmedMessage = typeof message === 'string' ? message.trim() : '';
+  const trimmedMessage = typeof message === 'string' ? message.trim().slice(0, 4000) : '';
   const model =
     typeof modelChoice === 'string' && ALLOWED_MODELS.has(modelChoice)
       ? modelChoice
@@ -190,8 +190,69 @@ function resolveServerPort(isProd: boolean): number {
   return envPort > 0 ? envPort : defaultPort;
 }
 
+type RateBucket = { timestamps: number[] };
+const rateLimitStore = new Map<string, RateBucket>();
+
+function checkRateLimit(key: string, maxRequests: number, windowMs: number): { allowed: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const bucket = rateLimitStore.get(key) || { timestamps: [] };
+  bucket.timestamps = bucket.timestamps.filter((t) => t > cutoff);
+  if (bucket.timestamps.length >= maxRequests) {
+    const oldest = bucket.timestamps[0] || now;
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+    rateLimitStore.set(key, bucket);
+    return { allowed: false, retryAfterSec };
+  }
+  bucket.timestamps.push(now);
+  rateLimitStore.set(key, bucket);
+  if (rateLimitStore.size > 2000) {
+    for (const [k, v] of rateLimitStore.entries()) {
+      if (v.timestamps.length === 0 || (v.timestamps[v.timestamps.length - 1] ?? 0) <= cutoff) {
+        rateLimitStore.delete(k);
+      }
+    }
+  }
+  return { allowed: true, retryAfterSec: 0 };
+}
+
+function sanitizeSingleLine(input: string, maxLen: number): string {
+  return input.replace(/[\r\n\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
+function sanitizeHttpUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return 'https://kothalink.app';
+    }
+    if (parsed.username || parsed.password) {
+      return 'https://kothalink.app';
+    }
+    return parsed.toString().slice(0, 400);
+  } catch {
+    return 'https://kothalink.app';
+  }
+}
+
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+
+  // Baseline security headers (iframe-compatible for AI Studio preview, COOP allows Google Auth popup)
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=(), payment=()');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
@@ -250,7 +311,16 @@ async function startServer() {
       return;
     }
 
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const ipLimit = checkRateLimit(`mail:ip:${ip}`, 20, 10 * 60 * 1000);
+    if (!ipLimit.allowed) {
+      res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+      res.status(429).json({ ok: false, configured: true, error: 'Too many alert requests. Please wait a few minutes.' });
+      return;
+    }
+
     let verifiedEmail = '';
+    let verifiedUid = '';
     try {
       const lookupRes = await fetch(
         `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(fbApiKey)}`,
@@ -265,16 +335,24 @@ async function startServer() {
         return;
       }
       const lookupData = (await lookupRes.json()) as {
-        users?: Array<{ localId?: string; email?: string }>;
+        users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
       };
       const fbUser = lookupData?.users?.[0];
-      if (!fbUser?.localId) {
-        res.status(401).json({ ok: false, error: 'Unauthorized user.' });
+      if (!fbUser?.localId || fbUser.emailVerified === false) {
+        res.status(401).json({ ok: false, error: 'Unauthorized or unverified account.' });
         return;
       }
+      verifiedUid = fbUser.localId;
       verifiedEmail = typeof fbUser.email === 'string' ? fbUser.email : '';
     } catch {
       res.status(401).json({ ok: false, error: 'Could not verify login session.' });
+      return;
+    }
+
+    const uidLimit = checkRateLimit(`mail:uid:${verifiedUid}`, 12, 10 * 60 * 1000);
+    if (!uidLimit.allowed) {
+      res.setHeader('Retry-After', String(uidLimit.retryAfterSec));
+      res.status(429).json({ ok: false, configured: true, error: 'Email alert limit reached. Please wait a few minutes.' });
       return;
     }
 
@@ -286,15 +364,15 @@ async function startServer() {
       isBangla?: boolean;
     };
 
-    const toEmail = typeof body.to === 'string' ? body.to.trim().toLowerCase() : '';
+    const toEmail = typeof body.to === 'string' ? sanitizeSingleLine(body.to, 120).toLowerCase() : '';
     if (!toEmail || toEmail.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) {
       res.status(400).json({ ok: false, error: 'Invalid recipient Gmail address.' });
       return;
     }
 
     const senderName =
-      typeof body.senderName === 'string' && body.senderName.trim()
-        ? body.senderName.trim().slice(0, 80)
+      typeof body.senderName === 'string' && sanitizeSingleLine(body.senderName, 80)
+        ? sanitizeSingleLine(body.senderName, 80)
         : 'KothaLink User';
     const preview =
       typeof body.messagePreview === 'string' && body.messagePreview.trim()
@@ -303,10 +381,7 @@ async function startServer() {
         ? 'নতুন মেসেজ পাঠিয়েছেন'
         : 'Sent you a new message';
     const rawChatUrl = typeof body.chatUrl === 'string' ? body.chatUrl.trim() : '';
-    const safeChatUrl =
-      rawChatUrl.startsWith('https://') || rawChatUrl.startsWith('http://')
-        ? rawChatUrl.slice(0, 400)
-        : 'https://kothalink.app';
+    const safeChatUrl = sanitizeHttpUrl(rawChatUrl);
 
     const subject = body.isBangla
       ? `KothaLink অ্যালার্ট: ${senderName} আপনাকে মেসেজ করেছেন`
@@ -317,33 +392,41 @@ async function startServer() {
       : `Hi,\n\n${senderName} sent you a message on KothaLink while you were offline:\n"${preview}"\n\nJoin Chat & Reply directly in KothaLink:\n${safeChatUrl}\n\n— KothaLink Official`;
 
     const safeSenderHtml = escapeHtml(senderName);
+    const senderInitial = escapeHtml((senderName.trim().charAt(0) || 'K').toUpperCase());
     const safePreviewHtml = escapeHtml(preview);
     const safeUrlHtml = escapeHtml(safeChatUrl);
     const htmlContent = `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#f8fafc; padding:24px; color:#0f172a;">
-        <div style="max-width:480px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
-          <div style="background:#2563eb; padding:18px 22px; color:#ffffff;">
-            <div style="font-size:16px; font-weight:700; letter-spacing:-0.01em;">KothaLink</div>
-            <div style="font-size:12px; opacity:0.9; margin-top:2px;">Official Message Alert</div>
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#f1f5f9; padding:16px 12px; color:#0f172a;">
+        <div style="max-width:480px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:20px; overflow:hidden; box-shadow:0 6px 24px rgba(15,23,42,0.06);">
+          <div style="background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%); padding:20px 22px; color:#ffffff;">
+            <div style="font-size:18px; font-weight:700; letter-spacing:-0.01em;">KothaLink</div>
+            <div style="font-size:12px; opacity:0.9; margin-top:3px;">${body.isBangla ? 'অফিশিয়াল মেসেজ অ্যালার্ট' : 'Official Message Alert'}</div>
           </div>
           <div style="padding:22px;">
-            <p style="margin:0 0 12px; font-size:14px; line-height:1.5; color:#334155;">
-              <strong>${safeSenderHtml}</strong> ${
-                body.isBangla
-                  ? 'আপনাকে একটি মেসেজ করেছেন (আপনি তখন অফলাইনে ছিলেন):'
-                  : 'sent you a message while you were offline:'
-              }
-            </p>
-            <div style="background:#f1f5f9; border-left:3px solid #2563eb; border-radius:8px; padding:12px 14px; font-size:14px; color:#0f172a; margin:0 0 18px;">
-              "${safePreviewHtml}"
+            <table role="presentation" cellspacing="0" cellpadding="0" style="width:100%; margin-bottom:14px;">
+              <tr>
+                <td style="width:40px; vertical-align:middle;">
+                  <div style="width:36px; height:36px; border-radius:12px; background:#dbeafe; color:#1d4ed8; font-weight:700; font-size:15px; line-height:36px; text-align:center;">${senderInitial}</div>
+                </td>
+                <td style="padding-left:10px; vertical-align:middle; font-size:14px; line-height:1.45; color:#334155;">
+                  <strong style="color:#0f172a;">${safeSenderHtml}</strong> ${
+                    body.isBangla
+                      ? 'আপনাকে একটি মেসেজ করেছেন (আপনি তখন অফলাইনে ছিলেন):'
+                      : 'sent you a message while you were offline:'
+                  }
+                </td>
+              </tr>
+            </table>
+            <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:14px; padding:14px 16px; font-size:14px; line-height:1.55; color:#0f172a; margin:0 0 18px;">
+              “${safePreviewHtml}”
             </div>
-            <a href="${safeUrlHtml}" style="display:inline-block; background:#2563eb; color:#ffffff; text-decoration:none; font-weight:600; font-size:14px; padding:12px 20px; border-radius:10px;">
-              ${body.isBangla ? 'চ্যাটে জয়েন ও রিপ্লাই দিন' : 'Join Chat & Reply'}
+            <a href="${safeUrlHtml}" style="display:block; text-align:center; background:#2563eb; color:#ffffff; text-decoration:none; font-weight:600; font-size:14px; padding:13px 20px; border-radius:12px;">
+              ${body.isBangla ? 'চ্যাটে জয়েন ও রিপ্লাই দিন →' : 'Join Chat & Reply →'}
             </a>
-            <p style="margin:14px 0 0; font-size:12px; color:#475569; word-break:break-all;">
+            <p style="margin:14px 0 0; font-size:12px; color:#475569; word-break:break-all; text-align:center;">
               <a href="${safeUrlHtml}" style="color:#2563eb; text-decoration:underline;">${safeUrlHtml}</a>
             </p>
-            <p style="margin:14px 0 0; font-size:11px; color:#64748b;">
+            <p style="margin:14px 0 0; font-size:11px; color:#64748b; text-align:center;">
               ${body.isBangla ? 'এই মেসেজটি KothaLink অফিশিয়াল অ্যালার্ট সিস্টেম থেকে পাঠানো হয়েছে।' : 'Sent via KothaLink Official Alert System.'}
             </p>
           </div>
@@ -415,6 +498,13 @@ async function startServer() {
   });
 
   app.post('/api/gemini/stream', async (req, res) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const aiLimit = checkRateLimit(`gemini:ip:${ip}`, 45, 5 * 60 * 1000);
+    if (!aiLimit.allowed) {
+      res.setHeader('Retry-After', String(aiLimit.retryAfterSec));
+      res.status(429).json({ error: 'Too many AI requests. Please wait a moment and try again.' });
+      return;
+    }
     const ai = getAiClient();
     if (!ai) {
       res.status(500).json({
@@ -480,6 +570,13 @@ async function startServer() {
   });
 
   app.post('/api/gemini/chat', async (req, res) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const aiLimit = checkRateLimit(`gemini:ip:${ip}`, 45, 5 * 60 * 1000);
+    if (!aiLimit.allowed) {
+      res.setHeader('Retry-After', String(aiLimit.retryAfterSec));
+      res.status(429).json({ error: 'Too many AI requests. Please wait a moment and try again.' });
+      return;
+    }
     const ai = getAiClient();
     if (!ai) {
       res.status(500).json({

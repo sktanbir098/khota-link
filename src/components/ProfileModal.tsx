@@ -2,23 +2,27 @@ import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowLeft,
+  Ban,
   Bell,
   BellRing,
   Check,
-  ChevronDown,
-  ChevronUp,
+  CheckCheck,
   CornerDownLeft,
-  Droplets,
+  Download,
   Eye,
   EyeOff,
+  FileCheck2,
+  KeyRound,
   Loader2,
+  Lock,
   LogOut,
   Moon,
-  RotateCcw,
+  Scale,
+  Search,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles,
   Sun,
   Trash2,
   User,
@@ -26,9 +30,24 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
+import {
+  AppLockConfig,
+  AutoLockDelayMinutes,
+  disableAppLockPin,
+  enableAppLockPin,
+  getAppLockConfig,
+  updateAppLockDelay,
+} from '../lib/appLock';
 import { formatFriendlyError, updateUserSettings } from '../lib/chatService';
 import { t } from '../lib/i18n';
-import { AppLanguage, AppTheme, UserPrivateInfo, UserPublicProfile } from '../types/chat';
+import {
+  AppLanguage,
+  AppTheme,
+  CURRENT_POLICY_VERSION,
+  UserPrivateInfo,
+  UserPublicProfile,
+} from '../types/chat';
+import { PolicyTab } from './LegalPolicyModal';
 import { UserAvatar } from './UserAvatar';
 
 interface Props {
@@ -36,27 +55,30 @@ interface Props {
   initialTab?: 'profile' | 'settings' | 'account';
   lang: AppLanguage;
   themeMode: AppTheme;
-  glassBlur: number;
-  glassSaturation: number;
   soundOn: boolean;
   notifPermission: NotificationPermission | 'unsupported';
   enterToSend: boolean;
   publicProfile: UserPublicProfile;
   privateInfo: UserPrivateInfo;
+  peerProfiles: Record<string, UserPublicProfile>;
   onClose: () => void;
   onUpdated: (updates: {
     displayName: string;
     bio: string;
     language: AppLanguage;
     showOnlineStatus: boolean;
+    searchable: boolean;
+    readReceiptsEnabled: boolean;
   }) => void;
   onChangeTheme: (mode: AppTheme) => void;
-  onChangeGlassBlur: (blur: number) => void;
-  onChangeGlassSaturation: (saturation: number) => void;
-  onResetGlass: () => void;
   onToggleSound: () => void;
   onRequestBgNotifications: () => void;
   onToggleEnterToSend: (val: boolean) => void;
+  onUnblockUser: (targetUid: string) => Promise<void>;
+  onOpenLegalModal: (tab: PolicyTab) => void;
+  onExportData: () => void;
+  onLockAppNow: () => void;
+  onAppLockChanged: () => void;
   onSignOut: () => void;
   onDeleteAccount: () => Promise<void>;
 }
@@ -109,22 +131,23 @@ export const ProfileModal: React.FC<Props> = ({
   initialTab = 'profile',
   lang,
   themeMode,
-  glassBlur,
-  glassSaturation,
   soundOn,
   notifPermission,
   enterToSend,
   publicProfile,
   privateInfo,
+  peerProfiles,
   onClose,
   onUpdated,
   onChangeTheme,
-  onChangeGlassBlur,
-  onChangeGlassSaturation,
-  onResetGlass,
   onToggleSound,
   onRequestBgNotifications,
   onToggleEnterToSend,
+  onUnblockUser,
+  onOpenLegalModal,
+  onExportData,
+  onLockAppNow,
+  onAppLockChanged,
   onSignOut,
   onDeleteAccount,
 }) => {
@@ -135,29 +158,83 @@ export const ProfileModal: React.FC<Props> = ({
   const [showOnlineStatus, setShowOnlineStatus] = useState<boolean>(
     publicProfile.showOnlineStatus !== false
   );
+  const [searchable, setSearchable] = useState<boolean>(
+    publicProfile.searchable !== false
+  );
+  const [readReceiptsEnabled, setReadReceiptsEnabled] = useState<boolean>(
+    privateInfo.readReceiptsEnabled !== false
+  );
+  const [appLockConfig, setAppLockConfig] = useState<AppLockConfig | null>(() =>
+    getAppLockConfig(publicProfile.uid)
+  );
+  const [showPinEditor, setShowPinEditor] = useState(false);
+  const [pinDraft, setPinDraft] = useState('');
+  const [pinSaving, setPinSaving] = useState(false);
+  const [pinError, setPinError] = useState('');
+  const [autoLockMinutes, setAutoLockMinutes] = useState<AutoLockDelayMinutes>(
+    () => getAppLockConfig(publicProfile.uid)?.autoLockMinutes ?? 1
+  );
+  const [unblockingUid, setUnblockingUid] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
   const [confirmDeleteAccount, setConfirmDeleteAccount] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [error, setError] = useState('');
-  const [glassTunerCollapsed, setGlassTunerCollapsed] = useState(false);
-  const [isDraggingGlass, setIsDraggingGlass] = useState(false);
-  const [glassLivePeek, setGlassLivePeek] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
-      setGlassLivePeek(false);
-      setIsDraggingGlass(false);
+      const cfg = getAppLockConfig(publicProfile.uid);
+      setAppLockConfig(cfg);
+      setAutoLockMinutes(cfg?.autoLockMinutes ?? 1);
+      setShowPinEditor(false);
+      setPinDraft('');
+      setPinError('');
     }
-  }, [isOpen, initialTab]);
+  }, [isOpen, initialTab, publicProfile.uid]);
 
   if (!isOpen) return null;
 
-  const isPreviewClear = activeTab === 'settings' && (isDraggingGlass || glassLivePeek);
-  const isDefaultGlass = glassBlur === 14 && glassSaturation === 205;
-
   const bioPresets = selectedLang === 'bn' ? BIO_PRESETS_BN : BIO_PRESETS_EN;
+  const blockedUids = privateInfo.blockedUids || [];
+
+  const handleSavePin = async () => {
+    if (!/^\d{4}$/.test(pinDraft)) {
+      setPinError(lang === 'bn' ? 'অবশ্যই ৪টি সংখ্যা (0-9) দিন।' : 'Please enter exactly 4 digits (0-9).');
+      return;
+    }
+    setPinError('');
+    setPinSaving(true);
+    try {
+      const next = await enableAppLockPin(publicProfile.uid, pinDraft, autoLockMinutes);
+      setAppLockConfig(next);
+      setShowPinEditor(false);
+      setPinDraft('');
+      onAppLockChanged();
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Failed to save PIN.');
+    } finally {
+      setPinSaving(false);
+    }
+  };
+
+  const handleDisablePin = () => {
+    disableAppLockPin(publicProfile.uid);
+    setAppLockConfig(null);
+    setShowPinEditor(false);
+    setPinDraft('');
+    setPinError('');
+    onAppLockChanged();
+  };
+
+  const handleDelayChange = (delay: AutoLockDelayMinutes) => {
+    setAutoLockMinutes(delay);
+    if (appLockConfig?.enabled) {
+      updateAppLockDelay(publicProfile.uid, delay);
+      setAppLockConfig(getAppLockConfig(publicProfile.uid));
+      onAppLockChanged();
+    }
+  };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -172,12 +249,16 @@ export const ProfileModal: React.FC<Props> = ({
         photoUrl: publicProfile.photoUrl,
         language: selectedLang,
         showOnlineStatus,
+        searchable,
+        readReceiptsEnabled,
       });
       onUpdated({
         displayName: displayName.trim() || publicProfile.displayName,
         bio: bio.trim(),
         language: selectedLang,
         showOnlineStatus,
+        searchable,
+        readReceiptsEnabled,
       });
       setSavedToast(true);
       window.setTimeout(() => {
@@ -215,35 +296,28 @@ export const ProfileModal: React.FC<Props> = ({
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-all duration-200 ${
-        isPreviewClear
-          ? 'bg-black/5 backdrop-blur-none'
-          : themeMode === 'glass'
-          ? 'bg-slate-900/15 backdrop-blur-[2px]'
-          : 'bg-black/55 backdrop-blur-sm'
-      } ${activeTab === 'settings' && !glassTunerCollapsed ? 'pb-44 sm:pb-48' : ''}`}
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 transition-opacity duration-150"
     >
       <motion.div
-        initial={{ opacity: 0, scale: 0.95, y: 10 }}
-        animate={{
-          opacity: glassLivePeek && activeTab === 'settings' ? 0.14 : isDraggingGlass ? 0.45 : 1,
-          scale: glassLivePeek && activeTab === 'settings' ? 0.97 : 1,
-          y: 0,
-        }}
-        exit={{ opacity: 0, scale: 0.95, y: 8 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        className={`w-full max-w-md bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-2xl max-h-[82dvh] flex flex-col ${
-          glassLivePeek && activeTab === 'settings' ? 'pointer-events-none' : ''
-        }`}
+        initial={{ opacity: 0, scale: 0.97, y: 18 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.97, y: 14 }}
+        transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-2xl max-h-[90dvh] sm:max-h-[85dvh] flex flex-col mobile-sheet-safe"
       >
+        <div className="sm:hidden flex justify-center pt-2.5 pb-0.5 shrink-0">
+          <span className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+        </div>
         {/* Header with Top-Left Back Button */}
-        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 liquid-divider flex items-center justify-between gap-3 shrink-0">
+        <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
               onClick={onClose}
               aria-label={t(lang, 'backBtn')}
-              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 liquid-control border border-transparent hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shrink-0 transition-colors"
+              className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 border border-transparent hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shrink-0 transition-colors"
             >
               <ArrowLeft className="w-4 h-4" />
             </button>
@@ -263,7 +337,7 @@ export const ProfileModal: React.FC<Props> = ({
 
         {/* Animated 3-Tab Switcher */}
         <div className="px-6 pt-4 shrink-0">
-          <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800">
+          <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               const active = activeTab === tab.id;
@@ -281,8 +355,8 @@ export const ProfileModal: React.FC<Props> = ({
                   {active && (
                     <motion.span
                       layoutId="profileModalTabIndicator"
-                      transition={{ type: 'spring', stiffness: 450, damping: 34 }}
-                      className="absolute inset-0 rounded-lg bg-white dark:bg-slate-800 liquid-pill-active shadow-sm -z-10"
+                      transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+                      className="absolute inset-0 rounded-lg bg-white dark:bg-slate-800 shadow-sm -z-10"
                     />
                   )}
                   <Icon className="w-3.5 h-3.5 shrink-0" />
@@ -306,7 +380,7 @@ export const ProfileModal: React.FC<Props> = ({
                   className="space-y-4"
                 >
                   {/* Profile Avatar & Bio Card */}
-                  <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800">
+                  <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
                     <UserAvatar
                       name={displayName.trim() || publicProfile.displayName}
                       photoUrl={publicProfile.photoUrl}
@@ -338,7 +412,7 @@ export const ProfileModal: React.FC<Props> = ({
                       maxLength={80}
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
-                      className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
                     />
                   </div>
 
@@ -358,7 +432,7 @@ export const ProfileModal: React.FC<Props> = ({
                       value={bio}
                       onChange={(e) => setBio(e.target.value)}
                       placeholder={t(lang, 'bioPlaceholder')}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-600"
                     />
                     <div className="space-y-1">
                       <span className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">
@@ -405,11 +479,10 @@ export const ProfileModal: React.FC<Props> = ({
                         <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
                           {t(lang, 'themeLabel')}
                         </label>
-                        <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-950 liquid-control rounded-xl border border-slate-200 dark:border-slate-800">
+                        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
                           {(
                             [
                               { id: 'light' as const, label: t(lang, 'lightMode'), Icon: Sun },
-                              { id: 'glass' as const, label: t(lang, 'glassMode'), Icon: Droplets },
                               { id: 'dark' as const, label: t(lang, 'darkMode'), Icon: Moon },
                             ] as const
                           ).map((opt) => {
@@ -420,7 +493,7 @@ export const ProfileModal: React.FC<Props> = ({
                                 key={opt.id}
                                 type="button"
                                 onClick={() => onChangeTheme(opt.id)}
-                                className={`relative z-10 min-h-[38px] py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
+                                className={`relative z-10 min-h-[38px] py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
                                   active
                                     ? opt.id === 'dark'
                                       ? 'text-white'
@@ -435,11 +508,11 @@ export const ProfileModal: React.FC<Props> = ({
                                     className={`absolute inset-0 rounded-lg -z-10 shadow-sm ${
                                       opt.id === 'dark'
                                         ? 'bg-slate-800'
-                                        : 'bg-white dark:bg-slate-800 liquid-pill-active'
+                                        : 'bg-white dark:bg-slate-800'
                                     }`}
                                   />
                                 )}
-                                <Icon className={`w-3.5 h-3.5 shrink-0 ${opt.id === 'glass' && active ? 'text-blue-600' : ''}`} />
+                                <Icon className={`w-3.5 h-3.5 shrink-0 ${opt.id === 'light' && active ? 'text-amber-500' : ''}`} />
                                 <span>{opt.label}</span>
                               </button>
                             );
@@ -451,13 +524,13 @@ export const ProfileModal: React.FC<Props> = ({
                         <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
                           {t(lang, 'languageLabel')}
                         </label>
-                        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-950 liquid-control rounded-xl border border-slate-200 dark:border-slate-800">
+                        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
                           <button
                             type="button"
                             onClick={() => setSelectedLang('en')}
                             className={`py-1.5 rounded-lg text-xs font-medium transition-colors ${
                               selectedLang === 'en'
-                                ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
+                                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
                                 : 'text-slate-600 dark:text-slate-400'
                             }`}
                           >
@@ -468,7 +541,7 @@ export const ProfileModal: React.FC<Props> = ({
                             onClick={() => setSelectedLang('bn')}
                             className={`py-1.5 rounded-lg text-xs font-medium transition-colors ${
                               selectedLang === 'bn'
-                                ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
+                                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
                                 : 'text-slate-600 dark:text-slate-400'
                             }`}
                           >
@@ -485,7 +558,7 @@ export const ProfileModal: React.FC<Props> = ({
                       {t(lang, 'notificationsSection')}
                     </div>
 
-                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 space-y-3.5">
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3.5">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-start gap-2.5 min-w-0">
                           {soundOn ? (
@@ -559,7 +632,7 @@ export const ProfileModal: React.FC<Props> = ({
                       {t(lang, 'privacySection')}
                     </div>
 
-                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 liquid-control border border-slate-200 dark:border-slate-800 space-y-3.5">
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3.5">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-start gap-2.5 min-w-0">
                           {showOnlineStatus ? (
@@ -583,7 +656,53 @@ export const ProfileModal: React.FC<Props> = ({
                         />
                       </div>
 
-                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 liquid-divider flex items-center justify-between gap-3">
+                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <CheckCheck
+                            className={`w-4 h-4 mt-0.5 shrink-0 ${
+                              readReceiptsEnabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'
+                            }`}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                              {t(lang, 'readReceiptsLabel')}
+                            </div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">
+                              {t(lang, 'readReceiptsHint')}
+                            </div>
+                          </div>
+                        </div>
+                        <AnimatedSwitch
+                          checked={readReceiptsEnabled}
+                          onToggle={() => setReadReceiptsEnabled((v) => !v)}
+                          label={t(lang, 'readReceiptsLabel')}
+                        />
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <Search
+                            className={`w-4 h-4 mt-0.5 shrink-0 ${
+                              searchable ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'
+                            }`}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                              {t(lang, 'searchableLabel')}
+                            </div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">
+                              {t(lang, 'searchableHint')}
+                            </div>
+                          </div>
+                        </div>
+                        <AnimatedSwitch
+                          checked={searchable}
+                          onToggle={() => setSearchable((v) => !v)}
+                          label={t(lang, 'searchableLabel')}
+                        />
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
                         <div className="flex items-start gap-2.5 min-w-0">
                           <CornerDownLeft className="w-4 h-4 text-blue-600 dark:text-blue-400 mt-0.5 shrink-0" />
                           <div className="min-w-0">
@@ -601,6 +720,257 @@ export const ProfileModal: React.FC<Props> = ({
                           label={t(lang, 'enterToSendLabel')}
                         />
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Security & App Lock (4-Digit PIN) */}
+                  <div className="space-y-2.5">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {t(lang, 'securitySectionTitle')}
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <KeyRound
+                            className={`w-4 h-4 mt-0.5 shrink-0 ${
+                              appLockConfig?.enabled
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : 'text-slate-400'
+                            }`}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                              {t(lang, 'appLockLabel')}
+                            </div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">
+                              {t(lang, 'appLockHint')}
+                            </div>
+                          </div>
+                        </div>
+                        {!showPinEditor && !appLockConfig?.enabled && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowPinEditor(true);
+                              setPinError('');
+                            }}
+                            className="min-h-[34px] px-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
+                          >
+                            {t(lang, 'appLockSetBtn')}
+                          </button>
+                        )}
+                      </div>
+
+                      {appLockConfig?.enabled && !showPinEditor && (
+                        <div className="space-y-2.5 pt-2.5 border-t border-slate-200 dark:border-slate-800">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onClose();
+                                onLockAppNow();
+                              }}
+                              className="min-h-[36px] px-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap"
+                            >
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>{t(lang, 'appLockNowBtn')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowPinEditor(true);
+                                setPinDraft('');
+                                setPinError('');
+                              }}
+                              className="min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold whitespace-nowrap"
+                            >
+                              {t(lang, 'appLockChangeBtn')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleDisablePin}
+                              className="min-h-[36px] px-3 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50/80 dark:bg-red-950/30 text-red-600 dark:text-red-400 hover:bg-red-100 text-xs font-semibold whitespace-nowrap"
+                            >
+                              {t(lang, 'appLockDisableBtn')}
+                            </button>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                              {t(lang, 'appLockAutoDelayLabel')}
+                            </div>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
+                              {(
+                                [
+                                  { val: 0 as const, key: 'autoLockImmediate' },
+                                  { val: 1 as const, key: 'autoLock1m' },
+                                  { val: 5 as const, key: 'autoLock5m' },
+                                  { val: 15 as const, key: 'autoLock15m' },
+                                ] as const
+                              ).map((opt) => (
+                                <button
+                                  key={opt.val}
+                                  type="button"
+                                  onClick={() => handleDelayChange(opt.val)}
+                                  className={`min-h-[34px] px-2 rounded-lg text-[11px] font-semibold border transition-colors whitespace-nowrap ${
+                                    autoLockMinutes === opt.val
+                                      ? 'bg-blue-600 text-white border-blue-600'
+                                      : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300'
+                                  }`}
+                                >
+                                  {t(lang, opt.key)}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {showPinEditor && (
+                        <div className="space-y-2.5 pt-2.5 border-t border-slate-200 dark:border-slate-800">
+                          <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                            {t(lang, 'enterNewPinTitle')}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="password"
+                              inputMode="numeric"
+                              maxLength={4}
+                              value={pinDraft}
+                              onChange={(e) => {
+                                setPinDraft(e.target.value.replace(/\D/g, '').slice(0, 4));
+                                setPinError('');
+                              }}
+                              placeholder={t(lang, 'confirmNewPinPlaceholder')}
+                              className="flex-1 min-w-0 min-h-[40px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-sm font-mono-tabular tracking-widest text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                            />
+                            <button
+                              type="button"
+                              disabled={pinSaving || pinDraft.length !== 4}
+                              onClick={() => void handleSavePin()}
+                              className="min-h-[40px] px-3.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-45 text-white text-xs font-semibold whitespace-nowrap shrink-0"
+                            >
+                              {pinSaving ? t(lang, 'saving') : t(lang, 'savePinBtn')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowPinEditor(false);
+                                setPinDraft('');
+                                setPinError('');
+                              }}
+                              className="min-h-[40px] px-2.5 rounded-xl text-xs font-medium text-slate-500 hover:text-slate-700 dark:text-slate-400"
+                            >
+                              {t(lang, 'cancel')}
+                            </button>
+                          </div>
+                          {pinError && (
+                            <p className="text-[11px] font-medium text-red-600 dark:text-red-400">
+                              {pinError}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Blocked Contacts */}
+                  <div className="space-y-2.5">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {t(lang, 'blockedUsersTitle')}
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2">
+                      {blockedUids.length === 0 ? (
+                        <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                          <Ban className="w-4 h-4 shrink-0 text-slate-400" />
+                          <span>{t(lang, 'noBlockedUsers')}</span>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {blockedUids.map((bUid) => {
+                            const prof = peerProfiles[bUid];
+                            return (
+                              <div
+                                key={bUid}
+                                className="flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800"
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <UserAvatar
+                                    name={prof?.displayName || 'User'}
+                                    photoUrl={prof?.photoUrl}
+                                    size="sm"
+                                    ringColorClass="ring-white dark:ring-slate-900"
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                      {prof?.displayName || `${bUid.slice(0, 10)}...`}
+                                    </div>
+                                    {prof?.maskedEmail && (
+                                      <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate font-mono-tabular">
+                                        {prof.maskedEmail}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={unblockingUid === bUid}
+                                  onClick={async () => {
+                                    setUnblockingUid(bUid);
+                                    try {
+                                      await onUnblockUser(bUid);
+                                    } finally {
+                                      setUnblockingUid(null);
+                                    }
+                                  }}
+                                  className="min-h-[34px] px-3 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap shrink-0"
+                                >
+                                  {unblockingUid === bUid ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    t(lang, 'unblockUserBtn')
+                                  )}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Legal & Policies */}
+                  <div className="space-y-2.5">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {t(lang, 'legalSectionTitle')}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {(
+                        [
+                          { id: 'privacy' as const, label: t(lang, 'privacyPolicyTitle'), Icon: ShieldCheck },
+                          { id: 'terms' as const, label: t(lang, 'termsOfServiceTitle'), Icon: Scale },
+                          { id: 'safety' as const, label: t(lang, 'safetyPolicyTitle'), Icon: ShieldAlert },
+                          { id: 'security' as const, label: t(lang, 'securityInfoTitle'), Icon: Lock },
+                        ] as const
+                      ).map((item) => {
+                        const Icon = item.Icon;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => onOpenLegalModal(item.id)}
+                            className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 hover:border-blue-400 dark:hover:border-blue-600 text-left flex items-center gap-2 transition-colors"
+                          >
+                            <Icon className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                            <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 leading-tight line-clamp-2">
+                              {item.label}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 </motion.div>
@@ -627,11 +997,64 @@ export const ProfileModal: React.FC<Props> = ({
                     </div>
                   </div>
 
+                  {/* Account Security Status & Policy Compliance */}
+                  <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                        {t(lang, 'securityStatusCardTitle')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onOpenLegalModal('security')}
+                        className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
+                      >
+                        <FileCheck2 className="w-3.5 h-3.5" />
+                        <span>v{CURRENT_POLICY_VERSION}</span>
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-[11px] font-semibold">
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/12 text-emerald-700 dark:text-emerald-400">
+                        <Check className="w-3.5 h-3.5" />
+                        {t(lang, 'verifiedGoogleBadge')}
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500/12 text-blue-700 dark:text-blue-400">
+                        <Lock className="w-3.5 h-3.5" />
+                        {t(lang, 'strictIsolationBadge')}
+                      </span>
+                      {privateInfo.acceptedPolicyVersion === CURRENT_POLICY_VERSION && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                          <FileCheck2 className="w-3.5 h-3.5" />
+                          {t(lang, 'policyAcceptedBadge')}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Export My Data (JSON) */}
+                  <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                        {t(lang, 'exportDataBtn')}
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        {t(lang, 'exportDataHint')}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onExportData}
+                      className="min-h-[38px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                      <span>JSON</span>
+                    </button>
+                  </div>
+
                   <motion.button
                     type="button"
                     whileTap={{ scale: 0.98 }}
                     onClick={onSignOut}
-                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 liquid-control hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center justify-center gap-2 transition-colors"
+                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-medium text-slate-800 dark:text-slate-200 flex items-center justify-center gap-2 transition-colors"
                   >
                     <LogOut className="w-4 h-4" />
                     {t(lang, 'signOut')}
@@ -697,11 +1120,11 @@ export const ProfileModal: React.FC<Props> = ({
 
           {/* Sticky Footer Save Action */}
           {activeTab !== 'account' && (
-            <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 liquid-surface liquid-divider flex items-center justify-between gap-3 shrink-0">
+            <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between gap-3 shrink-0">
               <button
                 type="button"
                 onClick={onClose}
-                className="min-h-[42px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 liquid-control text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                className="min-h-[42px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
               >
                 {t(lang, 'cancel')}
               </button>
@@ -729,163 +1152,6 @@ export const ProfileModal: React.FC<Props> = ({
           )}
         </form>
       </motion.div>
-
-      {/* Floating Real-Time Liquid Glass Blur & Saturation Tuner (visible in Settings) */}
-      <AnimatePresence>
-        {activeTab === 'settings' && (
-          <motion.div
-            key="floating-glass-tuner"
-            initial={{ opacity: 0, y: 24, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            transition={{ type: 'spring', stiffness: 360, damping: 28 }}
-            className="fixed bottom-3 left-3 right-3 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:w-full sm:max-w-md z-[60] rounded-2xl bg-white/85 dark:bg-slate-900/90 liquid-modal border border-slate-200/90 dark:border-slate-700/80 shadow-[0_20px_54px_rgba(15,23,42,0.24)] backdrop-blur-2xl overflow-hidden"
-          >
-            {/* Floating Control Header */}
-            <div className="px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-slate-200/70 dark:border-slate-800/80 liquid-divider">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="w-7 h-7 rounded-lg bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
-                  <Sparkles className="w-3.5 h-3.5" />
-                </span>
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                    {t(lang, 'glassControlsTitle')}
-                  </div>
-                  <div className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400 truncate">
-                    {glassBlur}px · {glassSaturation}%
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1 shrink-0">
-                {themeMode !== 'glass' ? (
-                  <button
-                    type="button"
-                    onClick={() => onChangeTheme('glass')}
-                    className="min-h-[34px] px-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold whitespace-nowrap transition-colors"
-                  >
-                    {t(lang, 'glassActivateBtn')}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setGlassLivePeek((v) => !v)}
-                    aria-pressed={glassLivePeek}
-                    className={`min-h-[34px] px-2.5 rounded-xl text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap transition-colors ${
-                      glassLivePeek
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 dark:bg-slate-800 liquid-control border border-transparent text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
-                    }`}
-                  >
-                    {glassLivePeek ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    <span>{t(lang, 'glassPreviewPeek')}</span>
-                  </button>
-                )}
-
-                {!isDefaultGlass && (
-                  <button
-                    type="button"
-                    onClick={onResetGlass}
-                    title={t(lang, 'glassResetBtn')}
-                    aria-label={t(lang, 'glassResetBtn')}
-                    className="min-h-[34px] min-w-[34px] px-2 rounded-xl bg-slate-100 dark:bg-slate-800 liquid-control border border-transparent hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-medium flex items-center justify-center gap-1 transition-colors"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setGlassTunerCollapsed((v) => !v)}
-                  aria-label={glassTunerCollapsed ? 'Expand Glass controls' : 'Collapse Glass controls'}
-                  className="min-h-[34px] min-w-[34px] rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center transition-colors"
-                >
-                  {glassTunerCollapsed ? (
-                    <ChevronUp className="w-4 h-4" />
-                  ) : (
-                    <ChevronDown className="w-4 h-4" />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* Sliders Body */}
-            {!glassTunerCollapsed && (
-              <div className="px-4 py-3 space-y-3">
-                {themeMode !== 'glass' && (
-                  <div className="text-[11px] text-amber-700 dark:text-amber-300 font-medium">
-                    {t(lang, 'glassSwitchHint')}
-                  </div>
-                )}
-
-                {/* Blur Intensity Slider */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <label
-                      htmlFor="glass-blur-slider"
-                      className="font-medium text-slate-700 dark:text-slate-200"
-                    >
-                      {t(lang, 'glassBlurLabel')}
-                    </label>
-                    <span className="font-mono-tabular font-semibold text-blue-600 dark:text-blue-400">
-                      {glassBlur}px
-                    </span>
-                  </div>
-                  <input
-                    id="glass-blur-slider"
-                    type="range"
-                    min={2}
-                    max={48}
-                    step={1}
-                    value={glassBlur}
-                    onPointerDown={() => setIsDraggingGlass(true)}
-                    onPointerUp={() => setIsDraggingGlass(false)}
-                    onPointerCancel={() => setIsDraggingGlass(false)}
-                    onBlur={() => setIsDraggingGlass(false)}
-                    onChange={(e) => {
-                      if (themeMode !== 'glass') onChangeTheme('glass');
-                      onChangeGlassBlur(Number(e.target.value));
-                    }}
-                    className="w-full glass-slider"
-                  />
-                </div>
-
-                {/* Saturation Level Slider */}
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <label
-                      htmlFor="glass-saturation-slider"
-                      className="font-medium text-slate-700 dark:text-slate-200"
-                    >
-                      {t(lang, 'glassSaturationLabel')}
-                    </label>
-                    <span className="font-mono-tabular font-semibold text-blue-600 dark:text-blue-400">
-                      {glassSaturation}%
-                    </span>
-                  </div>
-                  <input
-                    id="glass-saturation-slider"
-                    type="range"
-                    min={100}
-                    max={260}
-                    step={5}
-                    value={glassSaturation}
-                    onPointerDown={() => setIsDraggingGlass(true)}
-                    onPointerUp={() => setIsDraggingGlass(false)}
-                    onPointerCancel={() => setIsDraggingGlass(false)}
-                    onBlur={() => setIsDraggingGlass(false)}
-                    onChange={(e) => {
-                      if (themeMode !== 'glass') onChangeTheme('glass');
-                      onChangeGlassSaturation(Number(e.target.value));
-                    }}
-                    className="w-full glass-slider"
-                  />
-                </div>
-              </div>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 };

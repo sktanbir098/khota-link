@@ -60,7 +60,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'uid', 'displayName', 'photoUrl', 'bio', 'maskedEmail', 'hasPhone', 'showOnlineStatus',
-          'onlineStatus', 'lastSeenAt', 'createdAt', 'updatedAt'
+          'searchable', 'onlineStatus', 'lastSeenAt', 'createdAt', 'updatedAt'
         ])
         && data.uid is string && data.uid == userId && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
@@ -69,6 +69,7 @@ service cloud.firestore {
         && (!('maskedEmail' in data) || (data.maskedEmail is string && data.maskedEmail.size() <= 120))
         && data.hasPhone is bool
         && (!('showOnlineStatus' in data) || data.showOnlineStatus is bool)
+        && (!('searchable' in data) || data.searchable is bool)
         && data.onlineStatus in ['online', 'away', 'offline']
         && data.lastSeenAt is timestamp
         && data.createdAt is timestamp
@@ -77,11 +78,37 @@ service cloud.firestore {
 
     function isValidUserPrivate(data, userId) {
       return data.keys().hasAll(['uid', 'email', 'phoneNumber', 'language', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'email', 'phoneNumber', 'language', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'phoneNumber', 'language', 'pinnedChatIds',
+          'readReceiptsEnabled', 'blockedUids', 'acceptedPolicyVersion', 'acceptedPolicyAt',
+          'updatedAt'
+        ])
         && data.uid is string && data.uid == userId && isValidId(data.uid)
         && data.email is string && data.email.size() <= 120
         && data.phoneNumber is string && data.phoneNumber.size() <= 24 && data.phoneNumber.matches('^(\\+[0-9]{6,15})?$')
         && data.language in ['en', 'bn']
+        && (!('pinnedChatIds' in data) || (
+          data.pinnedChatIds is list
+          && data.pinnedChatIds.size() <= 50
+          && (data.pinnedChatIds.size() == 0 || (
+            data.pinnedChatIds[0] is string
+            && data.pinnedChatIds[0].size() >= 1
+            && data.pinnedChatIds[0].size() <= 128
+            && isValidId(data.pinnedChatIds[0])
+          ))
+        ))
+        && (!('readReceiptsEnabled' in data) || data.readReceiptsEnabled is bool)
+        && (!('blockedUids' in data) || (
+          data.blockedUids is list
+          && data.blockedUids.size() <= 100
+          && (data.blockedUids.size() == 0 || isValidId(data.blockedUids[0]))
+        ))
+        && (!('acceptedPolicyVersion' in data) || (
+          data.acceptedPolicyVersion is string
+          && data.acceptedPolicyVersion.size() >= 1
+          && data.acceptedPolicyVersion.size() <= 24
+        ))
+        && (!('acceptedPolicyAt' in data) || data.acceptedPolicyAt is timestamp)
         && data.updatedAt is timestamp;
     }
 
@@ -91,6 +118,26 @@ service cloud.firestore {
         && data.uid is string && data.uid == request.auth.uid && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
         && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSearchEntry(data, prefix3, userId) {
+      return data.keys().hasAll([
+          'uid', 'prefix', 'displayName', 'photoUrl', 'bio', 'maskedEmail', 'searchTerms', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'prefix', 'displayName', 'photoUrl', 'bio', 'maskedEmail', 'searchTerms', 'updatedAt'
+        ])
+        && data.uid is string && data.uid == userId && isValidId(data.uid)
+        && data.prefix is string && data.prefix == prefix3 && isValidId(data.prefix)
+        && data.prefix.size() >= 3 && data.prefix.size() <= 24
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.bio is string && data.bio.size() <= 160
+        && data.maskedEmail is string && data.maskedEmail.size() <= 120
+        && data.searchTerms is list
+        && data.searchTerms.size() >= 1 && data.searchTerms.size() <= 8
+        && data.searchTerms[0] is string && data.searchTerms[0].size() >= 1 && data.searchTerms[0].size() <= 80
         && data.updatedAt is timestamp;
     }
 
@@ -389,7 +436,9 @@ service cloud.firestore {
     // 1. Public user profiles (NO PII)
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow list: if isSignedIn()
+        && resource.data.displayName >= ''
+        && request.query.limit <= 100;
       allow create: if isVerifiedUser()
         && isOwner(userId)
         && isValidId(userId)
@@ -405,7 +454,10 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'bio', 'maskedEmail', 'hasPhone', 'showOnlineStatus', 'onlineStatus', 'lastSeenAt', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'photoUrl', 'bio', 'maskedEmail', 'hasPhone',
+            'showOnlineStatus', 'searchable', 'onlineStatus', 'lastSeenAt', 'updatedAt'
+          ])
         );
       allow delete: if isVerifiedUser() && isOwner(userId) && isValidId(userId);
 
@@ -417,6 +469,7 @@ service cloud.firestore {
           && isOwner(userId)
           && docId == 'info'
           && isValidUserPrivate(incoming(), userId)
+          && (!('acceptedPolicyAt' in incoming()) || incoming().acceptedPolicyAt == request.time)
           && incoming().updatedAt == request.time;
         allow update: if isVerifiedUser()
           && isOwner(userId)
@@ -424,7 +477,16 @@ service cloud.firestore {
           && isValidUserPrivate(incoming(), userId)
           && incoming().uid == existing().uid
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phoneNumber', 'language', 'updatedAt']);
+          && (
+            !('acceptedPolicyAt' in incoming())
+            || ('acceptedPolicyAt' in existing() && incoming().acceptedPolicyAt == existing().acceptedPolicyAt)
+            || incoming().acceptedPolicyAt == request.time
+          )
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'email', 'phoneNumber', 'language', 'pinnedChatIds',
+            'readReceiptsEnabled', 'blockedUids', 'acceptedPolicyVersion', 'acceptedPolicyAt',
+            'updatedAt'
+          ]);
         allow delete: if isVerifiedUser() && isOwner(userId) && isValidId(docId) && docId == 'info';
       }
     }
@@ -445,6 +507,47 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'updatedAt']);
       allow delete: if isVerifiedUser() && isValidId(emailHash) && existing().uid == request.auth.uid;
+    }
+
+    // 3b. 3-character prefix search index (bucket-scoped lookup only, no root enumeration)
+    match /search_buckets/{prefix3} {
+      allow read, write: if false;
+
+      match /users/{userId} {
+        allow get: if isSignedIn()
+          && isValidId(prefix3)
+          && prefix3.size() >= 3
+          && prefix3.size() <= 24
+          && isValidId(userId);
+        allow list: if isSignedIn()
+          && isValidId(prefix3)
+          && prefix3.size() >= 3
+          && prefix3.size() <= 24
+          && resource.data.prefix == prefix3
+          && request.query.limit <= 25;
+        allow create: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(prefix3)
+          && isValidId(userId)
+          && isValidSearchEntry(incoming(), prefix3, userId)
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(prefix3)
+          && isValidId(userId)
+          && isValidSearchEntry(incoming(), prefix3, userId)
+          && incoming().uid == existing().uid
+          && incoming().prefix == existing().prefix
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'photoUrl', 'bio', 'maskedEmail', 'searchTerms', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(prefix3)
+          && isValidId(userId);
+      }
     }
 
     // 4. SHA-256 Phone Directory (exact get only, no list)
@@ -892,6 +995,34 @@ service cloud.firestore {
         || isEmailHashMatch(existing().recipientHash)
         || isPhoneHashMatch(existing().recipientHash)
       );
+    }
+
+    // 12. Immutable User Safety & Abuse Reports
+    function isValidUserReport(data, reportId) {
+      return data.keys().hasAll([
+          'id', 'reporterUid', 'reportedUid', 'chatId', 'reason', 'details', 'status', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'reporterUid', 'reportedUid', 'chatId', 'reason', 'details', 'status', 'createdAt'
+        ])
+        && data.id is string && data.id == reportId && isValidId(data.id)
+        && data.reporterUid is string && data.reporterUid == request.auth.uid && isValidId(data.reporterUid)
+        && data.reportedUid is string && isValidId(data.reportedUid) && data.reportedUid != request.auth.uid
+        && data.chatId is string && data.chatId.size() <= 128 && (data.chatId == '' || isValidId(data.chatId))
+        && data.reason in ['spam', 'harassment', 'impersonation', 'scam', 'inappropriate', 'other']
+        && data.details is string && data.details.size() <= 500
+        && data.status == 'open'
+        && data.createdAt is timestamp;
+    }
+
+    match /reports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) && existing().reporterUid == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.reporterUid == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(reportId)
+        && isValidUserReport(incoming(), reportId)
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
     }
   }
 }

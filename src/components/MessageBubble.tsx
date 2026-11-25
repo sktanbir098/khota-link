@@ -59,6 +59,43 @@ interface Props {
   onDelete?: () => Promise<void> | void;
   onPreviewImage?: (dataUrl: string, name: string) => void;
   onResolveAttachment?: (messageId: string, marker: string) => Promise<string>;
+  searchQuery?: string;
+  isActiveSearchMatch?: boolean;
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function renderHighlightedText(
+  content: string,
+  query: string,
+  isMe: boolean,
+  isActiveMatch: boolean
+): React.ReactNode {
+  const trimmed = query.trim();
+  if (!trimmed || !content) return content;
+  const regex = new RegExp(`(${escapeRegExp(trimmed)})`, 'gi');
+  const parts = content.split(regex);
+  if (parts.length <= 1) return content;
+  return parts.map((part, i) =>
+    i % 2 === 1 ? (
+      <mark
+        key={i}
+        className={`rounded px-0.5 font-semibold ${
+          isActiveMatch
+            ? 'bg-amber-300 text-slate-950 ring-1 ring-amber-500/70'
+            : isMe
+            ? 'bg-amber-300/95 text-slate-950'
+            : 'bg-amber-200 dark:bg-amber-400/90 text-slate-950'
+        }`}
+      >
+        {part}
+      </mark>
+    ) : (
+      <React.Fragment key={i}>{part}</React.Fragment>
+    )
+  );
 }
 
 function formatAudioSeconds(sec: number): string {
@@ -69,7 +106,7 @@ function formatAudioSeconds(sec: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-export const MessageBubble: React.FC<Props> = ({
+const MessageBubbleInner: React.FC<Props> = ({
   id,
   lang = 'en',
   text,
@@ -95,6 +132,8 @@ export const MessageBubble: React.FC<Props> = ({
   onDelete,
   onPreviewImage,
   onResolveAttachment,
+  searchQuery = '',
+  isActiveSearchMatch = false,
 }) => {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [showMoreEmojis, setShowMoreEmojis] = useState(false);
@@ -272,56 +311,17 @@ export const MessageBubble: React.FC<Props> = ({
   const progressPercent =
     effectiveDuration > 0 ? Math.min(100, (audioCurrentTime / effectiveDuration) * 100) : 0;
 
-  return (
-    <motion.div
-      ref={containerRef}
-      layout="position"
-      initial={
-        animateSend
-          ? {
-              opacity: 0,
-              y: 18,
-              scale: 0.92,
-            }
-          : animateArrival
-          ? {
-              opacity: 0,
-              y: 12,
-              x: -16,
-              scale: 0.96,
-            }
-          : false
-      }
-      animate={{
-        opacity: 1,
-        y: 0,
-        x: 0,
-        scale: 1,
-      }}
-      transition={
-        animateSend || animateArrival
-          ? {
-              type: 'spring',
-              stiffness: 320,
-              damping: 26,
-              mass: 0.85,
-            }
-          : {
-              duration: 0.2,
-              ease: [0.22, 1, 0.36, 1],
-            }
-      }
-      className={`group relative flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
-    >
+  const bubbleBody = (
+    <>
       {/* Floating Reaction + Long-Press Action Menu Popover */}
       <AnimatePresence>
         {pickerOpen && (
           <motion.div
-            initial={{ opacity: 0, y: 8, scale: 0.92 }}
+            initial={{ opacity: 0, y: 6, scale: 0.94 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 4, scale: 0.94 }}
-            transition={{ type: 'spring', stiffness: 420, damping: 28 }}
-            className={`z-30 mb-1.5 p-2 rounded-2xl bg-white/95 dark:bg-slate-900/95 liquid-modal border border-slate-200 dark:border-slate-700 shadow-xl backdrop-blur-md flex flex-col gap-1.5 max-w-[88vw] ${
+            exit={{ opacity: 0, y: 4, scale: 0.95 }}
+            transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
+            className={`z-30 mb-1.5 p-2.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl flex flex-col gap-1.5 max-w-[calc(100vw-24px)] ${
               isMe ? 'self-end' : 'self-start'
             }`}
           >
@@ -388,7 +388,7 @@ export const MessageBubble: React.FC<Props> = ({
 
             {/* Long-Press Actions: Info, Reply, Copy, Delete */}
             {(onShowInfo || onReply || (onCopy && text) || onDelete) && (
-              <div className="pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center gap-1 flex-wrap">
+              <div className="pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center gap-1.5 flex-wrap">
                 {onShowInfo && (
                   <button
                     type="button"
@@ -396,7 +396,7 @@ export const MessageBubble: React.FC<Props> = ({
                       setPickerOpen(false);
                       onShowInfo();
                     }}
-                    className="min-h-[32px] px-2.5 rounded-xl bg-slate-100/80 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100/85 dark:bg-slate-800/85 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
                   >
                     <Info className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
                     <span>{t(lang, 'msgInfoBtn')}</span>
@@ -409,7 +409,7 @@ export const MessageBubble: React.FC<Props> = ({
                       setPickerOpen(false);
                       onReply();
                     }}
-                    className="min-h-[32px] px-2.5 rounded-xl bg-slate-100/80 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100/85 dark:bg-slate-800/85 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
                   >
                     <Reply className="w-3.5 h-3.5" />
                     <span>{t(lang, 'msgReplyBtn')}</span>
@@ -424,7 +424,7 @@ export const MessageBubble: React.FC<Props> = ({
                       window.setTimeout(() => setCopiedText(false), 1600);
                       setPickerOpen(false);
                     }}
-                    className="min-h-[32px] px-2.5 rounded-xl bg-slate-100/80 dark:bg-slate-800/80 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100/85 dark:bg-slate-800/85 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
                   >
                     <Copy className="w-3.5 h-3.5" />
                     <span>{t(lang, 'msgCopyBtn')}</span>
@@ -435,7 +435,7 @@ export const MessageBubble: React.FC<Props> = ({
                     type="button"
                     disabled={deletingMsg}
                     onClick={handleDeleteAction}
-                    className={`min-h-[32px] px-2.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                    className={`min-h-[36px] px-2.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
                       confirmingDelete
                         ? 'bg-red-600 hover:bg-red-700 text-white'
                         : 'bg-red-50 dark:bg-red-950/50 hover:bg-red-100 dark:hover:bg-red-950/80 text-red-600 dark:text-red-400'
@@ -468,12 +468,16 @@ export const MessageBubble: React.FC<Props> = ({
             e.preventDefault();
             setPickerOpen(true);
           }}
-          className={`relative overflow-hidden select-text max-w-[78vw] sm:max-w-md lg:max-w-lg rounded-2xl transition-all duration-200 ease-out active:scale-[0.985] ${
-            hasImage && !text && !replyToText ? 'p-1.5' : 'px-4 py-2.5'
+          className={`relative overflow-hidden select-text max-w-[82vw] sm:max-w-md lg:max-w-lg rounded-2xl transition-all duration-200 ease-out active:scale-[0.985] ${
+            hasImage && !text && !replyToText ? 'p-1.5' : 'px-3.5 sm:px-4 py-2.5'
           } ${
             isMe
-              ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/20 liquid-bubble-me'
-              : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 liquid-bubble-peer'
+              ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/20'
+              : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100'
+          } ${
+            isActiveSearchMatch
+              ? 'ring-2 ring-amber-400 dark:ring-amber-300 ring-offset-2 ring-offset-slate-50 dark:ring-offset-slate-950'
+              : ''
           }`}
         >
           {replyToText && (
@@ -484,7 +488,7 @@ export const MessageBubble: React.FC<Props> = ({
                   : 'border-slate-100 dark:border-slate-800 text-slate-500 dark:text-slate-400'
               }`}
             >
-              “{replyToText}”
+              “{renderHighlightedText(replyToText, searchQuery, isMe, isActiveSearchMatch)}”
             </div>
           )}
 
@@ -535,7 +539,7 @@ export const MessageBubble: React.FC<Props> = ({
               } ${
                 isMe
                   ? 'bg-blue-700/50 border-white/25 text-white'
-                  : 'bg-slate-50 dark:bg-slate-800/80 liquid-control border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
+                  : 'bg-slate-50 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
               }`}
             >
               <audio
@@ -643,7 +647,7 @@ export const MessageBubble: React.FC<Props> = ({
                   className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl border text-xs font-medium ${
                     isMe
                       ? 'bg-blue-700/50 border-white/25 text-white'
-                      : 'bg-slate-50 dark:bg-slate-800/70 liquid-control border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
+                      : 'bg-slate-50 dark:bg-slate-800/70 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100'
                   }`}
                 >
                   {downloadingFile ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
@@ -663,7 +667,7 @@ export const MessageBubble: React.FC<Props> = ({
               } ${
                 isMe
                   ? 'bg-blue-700/50 border-white/25 hover:bg-blue-700/70 text-white'
-                  : 'bg-slate-50 dark:bg-slate-800/70 liquid-control border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-900 dark:text-slate-100'
+                  : 'bg-slate-50 dark:bg-slate-800/70 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-900 dark:text-slate-100'
               }`}
             >
               <div
@@ -674,7 +678,9 @@ export const MessageBubble: React.FC<Props> = ({
                 <FileText className="w-4 h-4" />
               </div>
               <div className="min-w-0 flex-1 text-left">
-                <div className="text-xs font-semibold truncate">{attachmentName || 'Attachment'}</div>
+                <div className="text-xs font-semibold truncate">
+                  {renderHighlightedText(attachmentName || 'Attachment', searchQuery, isMe, isActiveSearchMatch)}
+                </div>
                 <div
                   className={`text-[11px] font-mono-tabular ${
                     isMe ? 'text-blue-100' : 'text-slate-500 dark:text-slate-400'
@@ -692,7 +698,9 @@ export const MessageBubble: React.FC<Props> = ({
           )}
 
           {text && (
-            <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{text}</p>
+            <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">
+              {renderHighlightedText(text, searchQuery, isMe, isActiveSearchMatch)}
+            </p>
           )}
 
           <div
@@ -707,9 +715,9 @@ export const MessageBubble: React.FC<Props> = ({
               const deliveryState = readAt ? 'seen' : deliveredAt ? 'delivered' : 'sent';
               const planeColorClass =
                 deliveryState === 'seen'
-                  ? 'text-emerald-300 fill-emerald-300/25 drop-shadow-[0_0_5px_rgba(110,231,183,0.55)]'
+                  ? 'text-emerald-300 fill-emerald-300/25'
                   : deliveryState === 'delivered'
-                  ? 'text-amber-300 fill-amber-300/20 drop-shadow-[0_0_4px_rgba(252,211,77,0.45)]'
+                  ? 'text-amber-300 fill-amber-300/20'
                   : optimistic
                   ? 'text-white/70 animate-pulse'
                   : 'text-white/95';
@@ -720,32 +728,25 @@ export const MessageBubble: React.FC<Props> = ({
                   ? t(lang, 'msgDeliveredLabel')
                   : t(lang, 'msgSentLabel');
               return (
-                <motion.span
-                  key={deliveryState}
-                  initial={{ scale: 0.65, opacity: 0.5 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  transition={{ type: 'spring', stiffness: 420, damping: 22 }}
-                  title={statusLabel}
-                  className="inline-flex items-center"
-                >
+                <span title={statusLabel} className="inline-flex items-center">
                   <Send
-                    className={`w-3.5 h-3.5 -rotate-12 transition-colors duration-200 ${planeColorClass}`}
+                    className={`w-3.5 h-3.5 -rotate-12 transition-colors duration-150 ${planeColorClass}`}
                     strokeWidth={2.2}
                     aria-label={statusLabel}
                   />
-                </motion.span>
+                </span>
               );
             })()}
           </div>
         </div>
 
-        {/* Inline Action Controls (Emoji React + Reply + Optional Copy) */}
-        <div className="flex items-center gap-0.5 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
+        {/* Inline Action Controls (mobile stays ultra-clean with quick react/menu dot; desktop shows full hover controls) */}
+        <div className="flex items-center gap-0.5 opacity-75 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
           <button
             type="button"
             onClick={() => setPickerOpen((prev) => !prev)}
-            aria-label="Add reaction"
-            className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+            aria-label="Message actions & reactions"
+            className="min-h-[30px] min-w-[30px] sm:min-h-[32px] sm:min-w-[32px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
           >
             <Smile className="w-3.5 h-3.5" />
           </button>
@@ -758,7 +759,7 @@ export const MessageBubble: React.FC<Props> = ({
                 window.setTimeout(() => setCopiedText(false), 1600);
               }}
               aria-label="Copy message"
-              className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+              className="hidden sm:flex min-h-[32px] min-w-[32px] items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
             >
               {copiedText ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
@@ -768,7 +769,7 @@ export const MessageBubble: React.FC<Props> = ({
               type="button"
               onClick={onReply}
               aria-label="Reply"
-              className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
+              className="hidden sm:flex min-h-[32px] min-w-[32px] items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition-colors"
             >
               <Reply className="w-3.5 h-3.5" />
             </button>
@@ -777,50 +778,103 @@ export const MessageBubble: React.FC<Props> = ({
       </div>
 
       {/* Reaction Counts & Emoji Types next to Bubble */}
-      <AnimatePresence>
-        {reactions.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: -2 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.14 }}
-            className={`mt-1 flex flex-wrap items-center gap-1 ${
-              isMe ? 'justify-end' : 'justify-start'
-            }`}
-          >
-            {reactions.map((r) => (
-              <motion.button
-                key={r.emoji}
-                type="button"
-                layout
-                whileTap={{ scale: 0.9 }}
-                onClick={() => onReact(r.emoji)}
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-xs font-mono-tabular transition-colors ${
-                  r.reactedByMe
-                    ? 'bg-blue-50 dark:bg-blue-950/60 liquid-pill-active border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300'
-                    : 'bg-white dark:bg-slate-900 liquid-control border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-                }`}
-              >
-                <span>{r.emoji}</span>
-                <span>{r.count}</span>
-              </motion.button>
-            ))}
-            <motion.button
+      {reactions.length > 0 && (
+        <div
+          className={`mt-1 flex flex-wrap items-center gap-1 ${
+            isMe ? 'justify-end' : 'justify-start'
+          }`}
+        >
+          {reactions.map((r) => (
+            <button
+              key={r.emoji}
               type="button"
-              whileTap={{ scale: 0.9 }}
-              onClick={() => {
-                setPickerOpen(true);
-                setShowMoreEmojis(true);
-              }}
-              aria-label={t(lang, 'msgMoreEmojisLabel')}
-              title={t(lang, 'msgMoreEmojisLabel')}
-              className="inline-flex items-center justify-center w-6 h-6 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 liquid-control text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+              onClick={() => onReact(r.emoji)}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-xs font-mono-tabular active:scale-95 transition-all ${
+                r.reactedByMe
+                  ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                  : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
             >
-              <Plus className="w-3 h-3" />
-            </motion.button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
+              <span>{r.emoji}</span>
+              <span>{r.count}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => {
+              setPickerOpen(true);
+              setShowMoreEmojis(true);
+            }}
+            aria-label={t(lang, 'msgMoreEmojisLabel')}
+            title={t(lang, 'msgMoreEmojisLabel')}
+            className="inline-flex items-center justify-center w-6 h-6 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 active:scale-95 transition-all"
+          >
+            <Plus className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+    </>
+  );
+
+  if (animateSend || animateArrival) {
+    return (
+      <motion.div
+        ref={containerRef}
+        data-msg-id={id}
+        initial={
+          animateSend
+            ? { opacity: 0, y: 12, scale: 0.96 }
+            : { opacity: 0, y: 8, x: -10, scale: 0.97 }
+        }
+        animate={{ opacity: 1, y: 0, x: 0, scale: 1 }}
+        transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+        className={`group relative flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+      >
+        {bubbleBody}
+      </motion.div>
+    );
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      data-msg-id={id}
+      className={`group relative flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+    >
+      {bubbleBody}
+    </div>
   );
 };
+
+export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) => {
+  if (
+    prev.id !== next.id ||
+    prev.lang !== next.lang ||
+    prev.text !== next.text ||
+    prev.senderName !== next.senderName ||
+    prev.timestampText !== next.timestampText ||
+    prev.isMe !== next.isMe ||
+    prev.replyToText !== next.replyToText ||
+    prev.attachmentType !== next.attachmentType ||
+    prev.attachmentName !== next.attachmentName ||
+    prev.attachmentData !== next.attachmentData ||
+    prev.optimistic !== next.optimistic ||
+    prev.justSent !== next.justSent ||
+    prev.justArrived !== next.justArrived ||
+    prev.searchQuery !== next.searchQuery ||
+    prev.isActiveSearchMatch !== next.isActiveSearchMatch ||
+    (prev.deliveredAt?.toMillis?.() ?? 0) !== (next.deliveredAt?.toMillis?.() ?? 0) ||
+    (prev.readAt?.toMillis?.() ?? 0) !== (next.readAt?.toMillis?.() ?? 0)
+  ) {
+    return false;
+  }
+  if (prev.reactions.length !== next.reactions.length) return false;
+  for (let i = 0; i < prev.reactions.length; i++) {
+    const a = prev.reactions[i];
+    const b = next.reactions[i];
+    if (a.emoji !== b.emoji || a.count !== b.count || a.reactedByMe !== b.reactedByMe) {
+      return false;
+    }
+  }
+  return true;
+});

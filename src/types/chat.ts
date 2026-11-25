@@ -28,7 +28,16 @@ export const LIMITS = {
   CALL_SDP_MAX: 24000,
   CALL_CANDIDATE_MAX: 2500,
   MAX_PARTICIPANTS: 10,
+  PINNED_CHATS_MAX: 50,
+  BLOCKED_USERS_MAX: 100,
+  REPORT_DETAILS_MAX: 500,
+  POLICY_VERSION_MAX: 24,
+  SEARCH_PREFIX_MAX: 24,
+  SEARCH_TERMS_MAX: 8,
+  SEARCH_BUCKET_LIMIT: 25,
 } as const;
+
+export const CURRENT_POLICY_VERSION = '2026.1';
 
 export type CallMode = 'audio' | 'video';
 export type CallStateStatus = 'ringing' | 'connected' | 'declined' | 'ended' | 'missed';
@@ -62,7 +71,7 @@ export type ChatChannel = 'gmail' | 'phone' | 'nearby';
 export type MessageTransport = 'gmail' | 'phone' | 'internet' | 'nearby' | 'bluetooth';
 export type AttachmentType = 'none' | 'image' | 'file';
 export type AppLanguage = 'en' | 'bn';
-export type AppTheme = 'glass' | 'dark' | 'light';
+export type AppTheme = 'dark' | 'light';
 export type StatusBgGradient = 'blue' | 'emerald' | 'amber' | 'rose' | 'slate';
 
 export const STATUS_REACTION_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮', '😢'] as const;
@@ -117,6 +126,7 @@ export interface UserPublicProfile {
   maskedEmail?: string;
   hasPhone: boolean;
   showOnlineStatus?: boolean;
+  searchable?: boolean;
   onlineStatus: 'online' | 'away' | 'offline';
   lastSeenAt: Timestamp | null;
   createdAt: Timestamp | null;
@@ -128,7 +138,25 @@ export interface UserPrivateInfo {
   email: string;
   phoneNumber: string;
   language: AppLanguage;
+  pinnedChatIds?: string[];
+  readReceiptsEnabled?: boolean;
+  blockedUids?: string[];
+  acceptedPolicyVersion?: string;
+  acceptedPolicyAt?: Timestamp | null;
   updatedAt: Timestamp | null;
+}
+
+export type ReportReason = 'spam' | 'harassment' | 'impersonation' | 'scam' | 'inappropriate' | 'other';
+
+export interface UserReport {
+  id: string;
+  reporterUid: string;
+  reportedUid: string;
+  chatId: string;
+  reason: ReportReason;
+  details: string;
+  status: 'open';
+  createdAt: Timestamp | null;
 }
 
 export interface DirectoryEntry {
@@ -136,6 +164,29 @@ export interface DirectoryEntry {
   displayName: string;
   photoUrl: string;
   updatedAt: Timestamp | null;
+}
+
+export interface UserSearchEntry {
+  uid: string;
+  prefix: string;
+  displayName: string;
+  photoUrl: string;
+  bio: string;
+  maskedEmail: string;
+  searchTerms: string[];
+  updatedAt: Timestamp | null;
+}
+
+export interface UserSearchResult {
+  uid: string;
+  displayName: string;
+  photoUrl: string;
+  bio: string;
+  maskedEmail: string;
+  onlineStatus?: 'online' | 'away' | 'offline';
+  lastSeenAt?: Timestamp | null;
+  showOnlineStatus?: boolean;
+  score: number;
 }
 
 export interface ChatRoom {

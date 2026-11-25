@@ -334,12 +334,12 @@ export const StatusModal: React.FC<Props> = (props) => {
     };
 
     return (
-      <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
+      <div className="fixed inset-0 z-50 bg-slate-950/95 flex items-center justify-center p-3 sm:p-4">
         <motion.div
-          initial={{ opacity: 0, scale: 0.94, y: 12 }}
+          initial={{ opacity: 0, scale: 0.96, y: 10 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.94 }}
-          transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+          exit={{ opacity: 0, scale: 0.96 }}
+          transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
           className={`relative w-full max-w-md h-[88dvh] sm:h-[84dvh] max-h-[720px] rounded-3xl overflow-hidden shadow-2xl border border-white/10 flex flex-col justify-between ${
             status.mediaType === 'image' ? 'bg-black' : STATUS_GRADIENTS[status.bgGradient] || STATUS_GRADIENTS.blue
           }`}
@@ -529,7 +529,7 @@ export const StatusModal: React.FC<Props> = (props) => {
             {error && <p className="text-xs text-red-300 text-center">{error}</p>}
 
             {/* Quick Reaction Emoji Strip + 1-Tap Like + Comments */}
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white/10 backdrop-blur-md border border-white/15 rounded-2xl p-1.5">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-slate-900/90 border border-white/15 rounded-2xl p-1.5">
               <div className="flex items-center justify-around sm:justify-start gap-0.5 sm:gap-1">
                 {STATUS_REACTION_EMOJIS.map((emoji) => {
                   const active = myReaction === emoji;
@@ -846,15 +846,22 @@ export const StatusModal: React.FC<Props> = (props) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div
+      onClick={props.onClose}
+      className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-4"
+    >
       <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 8 }}
+        initial={{ opacity: 0, scale: 0.97, y: 18 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96 }}
+        exit={{ opacity: 0, scale: 0.97, y: 14 }}
         transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-        className="w-full max-w-md bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-xl flex flex-col max-h-[90vh]"
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[92dvh] mobile-sheet-safe"
       >
-        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+        <div className="sm:hidden flex justify-center pt-2.5 pb-0.5 shrink-0">
+          <span className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+        </div>
+        <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"

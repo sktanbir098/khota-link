@@ -34,6 +34,9 @@
         "showOnlineStatus": {
           "type": "boolean"
         },
+        "searchable": {
+          "type": "boolean"
+        },
         "onlineStatus": {
           "type": "string",
           "enum": ["online", "away", "offline"]
@@ -77,6 +80,26 @@
           "type": "string",
           "enum": ["en", "bn"]
         },
+        "pinnedChatIds": {
+          "type": "array",
+          "description": "Ordered list of chat room IDs pinned to the top of the user's chat list (max 50)."
+        },
+        "readReceiptsEnabled": {
+          "type": "boolean"
+        },
+        "blockedUids": {
+          "type": "array",
+          "description": "UIDs of users blocked by this account (max 100)."
+        },
+        "acceptedPolicyVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "acceptedPolicyAt": {
+          "type": "string",
+          "format": "date-time"
+        },
         "updatedAt": {
           "type": "string",
           "format": "date-time"
@@ -110,6 +133,50 @@
         }
       },
       "required": ["uid", "displayName", "photoUrl", "updatedAt"]
+    },
+    "UserSearchEntry": {
+      "title": "UserSearchEntry",
+      "description": "Public 3-character prefix search index entry linking a normalized prefix bucket to a user's non-PII public profile.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "prefix": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 24,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "bio": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "maskedEmail": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "searchTerms": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "prefix", "displayName", "photoUrl", "bio", "maskedEmail", "searchTerms", "updatedAt"]
     },
     "ChatRoom": {
       "title": "ChatRoom",
@@ -794,6 +861,52 @@
         }
       },
       "required": ["uid", "email", "updatedAt"]
+    },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "Immutable safety & abuse report submitted by a verified user against another account.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "reporterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "reportedUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chatId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["spam", "harassment", "impersonation", "scam", "inappropriate", "other"]
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "reporterUid", "reportedUid", "chatId", "reason", "details", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -812,6 +925,10 @@
     "/phone_directory/{phoneHash}": {
       "schema": { "$ref": "#/entities/DirectoryEntry" },
       "description": "SHA-256 E.164 phone hash to public UID lookup."
+    },
+    "/search_buckets/{prefix3}/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserSearchEntry" },
+      "description": "3-character prefix search index storing non-PII public profile cards per normalized prefix bucket."
     },
     "/chats/{chatId}": {
       "schema": { "$ref": "#/entities/ChatRoom" },
@@ -876,6 +993,10 @@
     "/pending_deliveries/{deliveryId}": {
       "schema": { "$ref": "#/entities/PendingDelivery" },
       "description": "SHA-256 recipient email index for auto-delivering queued chats when a user signs in with Gmail."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/UserReport" },
+      "description": "Immutable abuse and safety reports submitted by signed-in users."
     }
   }
 }

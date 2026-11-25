@@ -4,36 +4,44 @@ import { AnimatePresence, motion, MotionConfig } from 'motion/react';
 import {
   ArrowDown,
   ArrowLeft,
+  Ban,
   Bell,
   BellOff,
   BellRing,
   Bluetooth,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Download,
-  Droplets,
   ExternalLink,
   FileText,
   Film,
   ImagePlus,
   Info,
   KeyRound,
+  Loader2,
+  Lock,
   Mail,
+  MessageSquare,
   MessageSquarePlus,
   Mic,
   Moon,
   Paperclip,
   Phone,
+  Pin,
   Plus,
   Search,
   Send,
   Settings,
   Share2,
+  ShieldCheck,
   Smile,
   Square,
   Sun,
   Trash2,
   Upload,
+  UserCheck,
   UserPlus,
   Video,
   Volume2,
@@ -41,33 +49,44 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
+import { AppLockScreen } from './components/AppLockScreen';
 import { BluetoothNearbyPanel } from './components/BluetoothNearbyPanel';
 import { ActiveCallSession, CallOverlay } from './components/CallOverlay';
 import { ConnectModal } from './components/ConnectModal';
 import { GeminiChatPanel } from './components/GeminiChatPanel';
 import { GeminiLogo } from './components/GeminiLogo';
 import { KothaLinkLogo, LaunchSplash } from './components/KothaLinkLogo';
+import { LegalPolicyModal, PolicyTab } from './components/LegalPolicyModal';
 import { AggregatedReaction, MessageBubble } from './components/MessageBubble';
 import { PeerProfileModal } from './components/PeerProfileModal';
 import { ProfileModal } from './components/ProfileModal';
+import { ReportUserModal } from './components/ReportUserModal';
 import { STATUS_GRADIENTS, StatusModal } from './components/StatusModal';
 import { UserAvatar } from './components/UserAvatar';
+import { getAppLockConfig, isAppLockEnabled } from './lib/appLock';
 import { formatFileSize, prepareAttachment, triggerFileDownload } from './lib/attachments';
 import {
+  acceptPolicyVersion,
   claimPendingEmailChats,
   createClientMessageId,
   deleteChatMessage,
   deleteChatRoom,
   deleteUserAccount,
   ensureUserProfile,
+  exportMyUserData,
   fetchAllChatParticipantEmails,
   formatFriendlyError,
+  getInstantLocalUserMatches,
+  hydrateSearchResultProfiles,
   joinChatByInviteCode,
   markChatMessagesDelivered,
   markChatMessagesSeen,
   resolveChunkedAttachment,
+  searchUserProfiles,
   sendChatMessage,
   setTypingStatus,
+  startChatByUserProfile,
+  submitUserReport,
   subscribeChatMessages,
   subscribeChatParticipantEmails,
   subscribeChatReactions,
@@ -77,12 +96,15 @@ import {
   subscribeUserProfiles,
   syncMyChatParticipantEmail,
   toggleMessageReaction,
+  updateBlockedUsers,
+  updatePinnedChats,
   updateUserPresence,
 } from './lib/chatService';
 import {
   auth,
   buildGmailWebComposeUrl,
   captureGmailTokenFromCredential,
+  checkOfficialMailerStatus,
   clearGmailAccessToken,
   googleProvider,
   maskEmail,
@@ -111,12 +133,16 @@ import {
   CallMode,
   ChatMessage,
   ChatRoom,
+  CURRENT_POLICY_VERSION,
+  LIMITS,
   MessageReaction,
   PreparedAttachment,
   ReactionEmoji,
+  ReportReason,
   TypingStatus,
   UserPrivateInfo,
   UserPublicProfile,
+  UserSearchResult,
   UserStatus,
 } from './types/chat';
 
@@ -208,26 +234,15 @@ function formatFullDateTime(
 }
 
 export default function App() {
-  // Theme (Light default | Glass | Dark) & language
+  // Theme (Light default | Dark) & language
   const [themeMode, setThemeMode] = useState<AppTheme>(() => {
     if (typeof window === 'undefined') return 'light';
     if (localStorage.getItem('kl_theme_user_picked') === '1') {
       const stored = localStorage.getItem('kl_theme');
-      if (stored === 'light' || stored === 'glass' || stored === 'dark') return stored;
+      if (stored === 'light' || stored === 'dark') return stored;
+      if (stored === 'glass') return 'light';
     }
     return 'light';
-  });
-  const [glassBlur, setGlassBlur] = useState<number>(() => {
-    if (typeof window === 'undefined') return 14;
-    if (localStorage.getItem('kl_glass_v2') !== '1') return 14;
-    const raw = Number(localStorage.getItem('kl_glass_blur'));
-    return Number.isFinite(raw) && raw >= 2 && raw <= 48 ? raw : 14;
-  });
-  const [glassSaturation, setGlassSaturation] = useState<number>(() => {
-    if (typeof window === 'undefined') return 205;
-    if (localStorage.getItem('kl_glass_v2') !== '1') return 205;
-    const raw = Number(localStorage.getItem('kl_glass_sat'));
-    return Number.isFinite(raw) && raw >= 100 && raw <= 260 ? raw : 205;
   });
   const [lang, setLang] = useState<AppLanguage>(() => {
     if (typeof window === 'undefined') return 'en';
@@ -293,8 +308,21 @@ export default function App() {
   // Navigation & filters
   const [filterTab, setFilterTab] = useState<'all' | 'gmail' | 'nearby'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [chatSearchFilterOnly, setChatSearchFilterOnly] = useState(true);
+  const [chatSearchMatchIdx, setChatSearchMatchIdx] = useState(0);
+  const chatSearchInputRef = useRef<HTMLInputElement>(null);
   const [workspaceView, setWorkspaceView] = useState<'hub' | 'chat' | 'bluetooth' | 'gemini'>('hub');
-  const [pendingEmailsByChat, setPendingEmailsByChat] = useState<Record<string, string>>({});
+  const [officialMailerReady, setOfficialMailerReady] = useState<boolean | null>(null);
+  const [pendingEmailsByChat, setPendingEmailsByChat] = useState<Record<string, string>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const parsed = JSON.parse(localStorage.getItem('kl_pending_emails') || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
   const [peerEmailsByChat, setPeerEmailsByChat] = useState<Record<string, string>>(() => {
     if (typeof window === 'undefined') return {};
     try {
@@ -318,6 +346,17 @@ export default function App() {
     try {
       const parsed = JSON.parse(localStorage.getItem('kl_muted_sound_chats') || '[]');
       return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [pinnedChatIds, setPinnedChatIds] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const parsed = JSON.parse(localStorage.getItem('kl_pinned_chats') || '[]');
+      return Array.isArray(parsed)
+        ? parsed.filter((id): id is string => typeof id === 'string').slice(0, LIMITS.PINNED_CHATS_MAX)
+        : [];
     } catch {
       return [];
     }
@@ -347,10 +386,26 @@ export default function App() {
 
   // Modals & deep links
   const [connectModalOpen, setConnectModalOpen] = useState(false);
-  const [connectModalTab, setConnectModalTab] = useState<'gmail' | 'invite'>('gmail');
+  const [connectModalTab, setConnectModalTab] = useState<'search' | 'gmail' | 'invite'>('search');
+  const [sidebarPeopleResults, setSidebarPeopleResults] = useState<UserSearchResult[]>([]);
+  const [sidebarSearchingPeople, setSidebarSearchingPeople] = useState(false);
+  const [startingSearchUid, setStartingSearchUid] = useState<string | null>(null);
+  const [previewedUser, setPreviewedUser] = useState<UserSearchResult | null>(null);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [profileModalTab, setProfileModalTab] = useState<'profile' | 'settings' | 'account'>('profile');
   const [peerProfileModalOpen, setPeerProfileModalOpen] = useState(false);
+  const [legalModalState, setLegalModalState] = useState<{ open: boolean; tab: PolicyTab }>({
+    open: false,
+    tab: 'privacy',
+  });
+  const [reportTarget, setReportTarget] = useState<{
+    uid: string;
+    name: string;
+    chatId?: string;
+  } | null>(null);
+  const [appLocked, setAppLocked] = useState(false);
+  const [appLockVersion, setAppLockVersion] = useState(0);
+  const justSignedInUidRef = useRef<string | null>(null);
   const [statusCreateOpen, setStatusCreateOpen] = useState(false);
   const [statusViewer, setStatusViewer] = useState<{
     statuses: UserStatus[];
@@ -422,6 +477,7 @@ export default function App() {
   useEffect(() => {
     initAudioUnlock();
     void registerServiceWorker();
+    void checkOfficialMailerStatus().then(setOfficialMailerReady);
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
       const onSwMsg = (event: MessageEvent) => {
         if (event.data && event.data.type === 'OPEN_CHAT' && event.data.chatId) {
@@ -511,22 +567,13 @@ export default function App() {
     };
   }, [notifOpen]);
 
-  // Apply Glass / Dark / Light classes and Glassmorphism intensity variables to <html>
+  // Apply Light / Dark class to <html>
   useEffect(() => {
     const root = document.documentElement;
     root.classList.toggle('dark', themeMode === 'dark');
-    root.classList.toggle('liquid-glass', themeMode === 'glass');
+    root.classList.remove('liquid-glass');
     localStorage.setItem('kl_theme', themeMode);
   }, [themeMode]);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty('--glass-blur', `${glassBlur}px`);
-    root.style.setProperty('--glass-saturation', `${glassSaturation}%`);
-    localStorage.setItem('kl_glass_v2', '1');
-    localStorage.setItem('kl_glass_blur', String(glassBlur));
-    localStorage.setItem('kl_glass_sat', String(glassSaturation));
-  }, [glassBlur, glassSaturation]);
 
   const handleSelectThemeMode = (mode: AppTheme) => {
     if (typeof window !== 'undefined') {
@@ -536,7 +583,7 @@ export default function App() {
   };
 
   const cycleThemeMode = () => {
-    handleSelectThemeMode(themeMode === 'light' ? 'glass' : themeMode === 'glass' ? 'dark' : 'light');
+    handleSelectThemeMode(themeMode === 'light' ? 'dark' : 'light');
   };
 
   useEffect(() => {
@@ -574,14 +621,24 @@ export default function App() {
   }, [peerEmailsByChat]);
 
   useEffect(() => {
+    localStorage.setItem('kl_pending_emails', JSON.stringify(pendingEmailsByChat));
+  }, [pendingEmailsByChat]);
+
+  useEffect(() => {
     localStorage.setItem('kl_offline_alert_optout', JSON.stringify(offlineAlertOptOutChats));
   }, [offlineAlertOptOutChats]);
+
+  useEffect(() => {
+    localStorage.setItem('kl_pinned_chats', JSON.stringify(pinnedChatIds));
+  }, [pinnedChatIds]);
 
   // Auth listener
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (!user) {
+        justSignedInUidRef.current = null;
+        setAppLocked(false);
         clearGmailAccessToken();
         setPublicProfile(null);
         setPrivateInfo(null);
@@ -597,8 +654,21 @@ export default function App() {
         setPublicProfile(pub);
         setPrivateInfo(priv);
         setAuthError('');
+        setAppLocked(
+          justSignedInUidRef.current === pub.uid ? false : isAppLockEnabled(pub.uid)
+        );
         if (priv.language === 'bn' || priv.language === 'en') {
           setLang(priv.language);
+        }
+        if (Array.isArray(priv.pinnedChatIds)) {
+          setPinnedChatIds(priv.pinnedChatIds.slice(0, LIMITS.PINNED_CHATS_MAX));
+        } else {
+          setPinnedChatIds((localPins) => {
+            if (localPins.length > 0) {
+              void updatePinnedChats({ uid: pub.uid, pinnedChatIds: localPins }).catch(() => {});
+            }
+            return localPins;
+          });
         }
         void claimPendingEmailChats({ user, currentUser: pub }).catch(() => 0);
       } catch (err) {
@@ -609,6 +679,55 @@ export default function App() {
     });
     return () => unsub();
   }, []);
+
+  // App PIN Auto-Lock (visibility + inactivity timer)
+  useEffect(() => {
+    const uid = publicProfile?.uid;
+    if (!uid || appLocked) return;
+    const cfg = getAppLockConfig(uid);
+    if (!cfg?.enabled) return;
+
+    let hiddenAt = 0;
+    let idleTimer: number | null = null;
+    const delayMs = cfg.autoLockMinutes * 60_000;
+
+    const resetIdleTimer = () => {
+      if (idleTimer !== null) window.clearTimeout(idleTimer);
+      if (delayMs > 0) {
+        idleTimer = window.setTimeout(() => {
+          if (isAppLockEnabled(uid)) setAppLocked(true);
+        }, delayMs);
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        if (cfg.autoLockMinutes === 0) {
+          setAppLocked(true);
+        } else {
+          hiddenAt = Date.now();
+        }
+      } else if (document.visibilityState === 'visible') {
+        if (hiddenAt > 0 && delayMs > 0 && Date.now() - hiddenAt >= delayMs) {
+          setAppLocked(true);
+        }
+        hiddenAt = 0;
+        resetIdleTimer();
+      }
+    };
+
+    resetIdleTimer();
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pointerdown', resetIdleTimer, { passive: true });
+    window.addEventListener('keydown', resetIdleTimer);
+
+    return () => {
+      if (idleTimer !== null) window.clearTimeout(idleTimer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pointerdown', resetIdleTimer);
+      window.removeEventListener('keydown', resetIdleTimer);
+    };
+  }, [publicProfile?.uid, appLocked, appLockVersion]);
 
   // Auto-handle deep-linked invite or nearby room once signed in
   useEffect(() => {
@@ -991,9 +1110,10 @@ export default function App() {
     const uid = publicProfile?.uid;
     if (!uid || !activeChatId || workspaceView !== 'chat' || messages.length === 0) return;
 
+    const receiptsEnabled = privateInfo?.readReceiptsEnabled !== false;
     const tryMarkSeen = () => {
       if (document.visibilityState === 'visible') {
-        void markChatMessagesSeen(activeChatId, uid, messages);
+        void markChatMessagesSeen(activeChatId, uid, messages, receiptsEnabled);
       }
     };
 
@@ -1004,7 +1124,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', tryMarkSeen);
       window.removeEventListener('focus', tryMarkSeen);
     };
-  }, [activeChatId, workspaceView, messages, publicProfile?.uid]);
+  }, [activeChatId, workspaceView, messages, publicProfile?.uid, privateInfo?.readReceiptsEnabled]);
 
   // Keep open Message Info dialog synchronized with real-time delivery/seen timestamps
   const liveMessageInfo = useMemo(() => {
@@ -1020,6 +1140,79 @@ export default function App() {
     const unconfirmed = pending.filter((m) => !confirmedIds.has(m.id));
     return unconfirmed.length > 0 ? [...messages, ...unconfirmed] : messages;
   }, [messages, optimisticByChat, activeChatId]);
+
+  const trimmedChatSearch = chatSearchQuery.trim();
+  const matchingMessageIds = useMemo(() => {
+    if (!trimmedChatSearch) return [] as string[];
+    const needle = trimmedChatSearch.toLowerCase();
+    return renderedMessages
+      .filter((m) => {
+        const inText = m.text?.toLowerCase().includes(needle);
+        const inReply = m.replyToText?.toLowerCase().includes(needle);
+        const inAttachment = m.attachmentName?.toLowerCase().includes(needle);
+        return Boolean(inText || inReply || inAttachment);
+      })
+      .map((m) => m.id);
+  }, [renderedMessages, trimmedChatSearch]);
+
+  const activeSearchMatchId =
+    matchingMessageIds.length > 0
+      ? matchingMessageIds[Math.min(chatSearchMatchIdx, matchingMessageIds.length - 1)]
+      : null;
+
+  const displayedMessages = useMemo(() => {
+    if (!trimmedChatSearch || !chatSearchFilterOnly) return renderedMessages;
+    const matchSet = new Set(matchingMessageIds);
+    return renderedMessages.filter((m) => matchSet.has(m.id));
+  }, [renderedMessages, trimmedChatSearch, chatSearchFilterOnly, matchingMessageIds]);
+
+  const renderedMessageIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < renderedMessages.length; i++) {
+      map.set(renderedMessages[i].id, i);
+    }
+    return map;
+  }, [renderedMessages]);
+
+  // Reset in-chat search cleanly when switching conversations
+  useEffect(() => {
+    setChatSearchQuery('');
+    setChatSearchMatchIdx(0);
+  }, [activeChatId]);
+
+  // Keep match index in range and smoothly scroll active match into view
+  useEffect(() => {
+    if (matchingMessageIds.length === 0) {
+      if (chatSearchMatchIdx !== 0) setChatSearchMatchIdx(0);
+      return;
+    }
+    const clampedIdx = Math.min(chatSearchMatchIdx, matchingMessageIds.length - 1);
+    if (clampedIdx !== chatSearchMatchIdx) {
+      setChatSearchMatchIdx(clampedIdx);
+      return;
+    }
+    const targetId = matchingMessageIds[clampedIdx];
+    const container = feedScrollRef.current;
+    if (!container || !targetId) return;
+    const targetEl = container.querySelector(`[data-msg-id="${CSS.escape(targetId)}"]`);
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [matchingMessageIds, chatSearchMatchIdx, chatSearchFilterOnly]);
+
+  // Support Ctrl/Cmd+F to focus the active conversation search bar
+  useEffect(() => {
+    if (workspaceView !== 'chat' || !activeChatId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        chatSearchInputRef.current?.focus();
+        chatSearchInputRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [workspaceView, activeChatId]);
 
   const activePeerTypers = useMemo(() => {
     if (!publicProfile) return [];
@@ -1150,19 +1343,136 @@ export default function App() {
     return map;
   }, [reactions, publicProfile]);
 
+  const pinnedOrderMap = useMemo(() => {
+    const map = new Map<string, number>();
+    pinnedChatIds.forEach((id, idx) => map.set(id, idx));
+    return map;
+  }, [pinnedChatIds]);
+
   const filteredChats = useMemo(() => {
-    return chats.filter((chat) => {
+    const matches = chats.filter((chat) => {
       if (filterTab !== 'all' && chat.channel !== filterTab) return false;
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase();
+      const peerId = chat.participantIds.find((id) => id !== publicProfile?.uid);
+      const livePeerName = peerId ? peerProfiles[peerId]?.displayName?.toLowerCase() || '' : '';
       return (
         chat.title.toLowerCase().includes(q) ||
         chat.peerName.toLowerCase().includes(q) ||
+        livePeerName.includes(q) ||
         chat.targetHint.toLowerCase().includes(q) ||
         chat.lastMessageText.toLowerCase().includes(q)
       );
     });
-  }, [chats, filterTab, searchQuery]);
+    if (pinnedOrderMap.size === 0) return matches;
+    return [...matches].sort((a, b) => {
+      const aPinIdx = pinnedOrderMap.get(a.id);
+      const bPinIdx = pinnedOrderMap.get(b.id);
+      if (aPinIdx !== undefined && bPinIdx !== undefined) {
+        return aPinIdx - bPinIdx;
+      }
+      if (aPinIdx !== undefined) return -1;
+      if (bPinIdx !== undefined) return 1;
+      return 0;
+    });
+  }, [chats, filterTab, searchQuery, pinnedOrderMap, peerProfiles, publicProfile?.uid]);
+
+  const handleTogglePinChat = useCallback(
+    (chatId: string) => {
+      setPinnedChatIds((prev) => {
+        const isCurrentlyPinned = prev.includes(chatId);
+        let next: string[];
+        if (isCurrentlyPinned) {
+          next = prev.filter((id) => id !== chatId);
+        } else {
+          if (prev.length >= LIMITS.PINNED_CHATS_MAX) {
+            setChatError(t(lang, 'pinLimitReached'));
+            return prev;
+          }
+          next = [chatId, ...prev.filter((id) => id !== chatId)];
+        }
+        if (publicProfile?.uid) {
+          void updatePinnedChats({ uid: publicProfile.uid, pinnedChatIds: next }).catch(() => {});
+        }
+        return next;
+      });
+    },
+    [publicProfile?.uid, lang]
+  );
+
+  // Fast 3-letter global user profile search synchronized with sidebar search input
+  useEffect(() => {
+    if (!publicProfile?.uid) {
+      setSidebarPeopleResults([]);
+      setSidebarSearchingPeople(false);
+      return;
+    }
+    const trimmed = searchQuery.trim();
+    const charLen = Array.from(trimmed).length;
+    if (charLen < 2) {
+      setSidebarPeopleResults([]);
+      setSidebarSearchingPeople(false);
+      return;
+    }
+
+    const blockedUids = privateInfo?.blockedUids || [];
+    const instant = getInstantLocalUserMatches({
+      queryText: trimmed,
+      currentUid: publicProfile.uid,
+      knownProfiles: peerProfiles,
+      blockedUids,
+    });
+    setSidebarPeopleResults(instant);
+
+    if (charLen < 3) {
+      setSidebarSearchingPeople(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSidebarSearchingPeople(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const found = await searchUserProfiles({
+          queryText: trimmed,
+          currentUid: publicProfile.uid,
+          knownProfiles: peerProfiles,
+          blockedUids,
+        });
+        if (cancelled) return;
+        setSidebarPeopleResults(found);
+        setSidebarSearchingPeople(false);
+
+        if (found.length > 0) {
+          const liveMap = await hydrateSearchResultProfiles(found.map((u) => u.uid));
+          if (cancelled || Object.keys(liveMap).length === 0) return;
+          setSidebarPeopleResults((prev) =>
+            prev.map((item) => {
+              const live = liveMap[item.uid];
+              if (!live) return item;
+              return {
+                ...item,
+                displayName: live.displayName || item.displayName,
+                photoUrl: live.photoUrl || item.photoUrl,
+                bio: live.bio || item.bio,
+                maskedEmail: live.maskedEmail || item.maskedEmail,
+                onlineStatus: live.onlineStatus,
+                lastSeenAt: live.lastSeenAt,
+                showOnlineStatus: live.showOnlineStatus,
+              };
+            })
+          );
+        }
+      } catch {
+        if (!cancelled) setSidebarSearchingPeople(false);
+      }
+    }, 80);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, publicProfile?.uid, peerProfiles, privateInfo?.blockedUids]);
 
   const unreadChats = useMemo(
     () => chats.filter((c) => unreadChatIds.has(c.id)),
@@ -1179,12 +1489,17 @@ export default function App() {
       setGuestBluetoothOpen(false);
       // If the same user was already signed in (e.g. retrying after a network error), ensure profile loads immediately
       if (result.user) {
+        justSignedInUidRef.current = result.user.uid;
+        setAppLocked(false);
         const { publicProfile: pub, privateInfo: priv } = await ensureUserProfile(result.user);
         setFirebaseUser(result.user);
         setPublicProfile(pub);
         setPrivateInfo(priv);
         if (priv.language === 'bn' || priv.language === 'en') {
           setLang(priv.language);
+        }
+        if (Array.isArray(priv.pinnedChatIds)) {
+          setPinnedChatIds(priv.pinnedChatIds.slice(0, LIMITS.PINNED_CHATS_MAX));
         }
         void claimPendingEmailChats({ user: result.user, currentUser: pub }).catch(() => 0);
       }
@@ -1215,11 +1530,44 @@ export default function App() {
 
   const handleSignOut = async () => {
     setProfileModalOpen(false);
+    setAppLocked(false);
+    justSignedInUidRef.current = null;
     clearGmailAccessToken();
     if (publicProfile?.uid) {
       await updateUserPresence(publicProfile.uid, 'offline');
     }
     await signOut(auth);
+  };
+
+  const handleToggleBlockUid = async (targetUid: string, forceBlock?: boolean) => {
+    if (!publicProfile || !privateInfo || !targetUid || targetUid === publicProfile.uid) return;
+    const current = privateInfo.blockedUids || [];
+    const alreadyBlocked = current.includes(targetUid);
+    const shouldBlock = typeof forceBlock === 'boolean' ? forceBlock : !alreadyBlocked;
+    if (shouldBlock === alreadyBlocked) return;
+    const next = shouldBlock
+      ? [targetUid, ...current].slice(0, LIMITS.BLOCKED_USERS_MAX)
+      : current.filter((id) => id !== targetUid);
+    setPrivateInfo((prev) => (prev ? { ...prev, blockedUids: next } : prev));
+    await updateBlockedUsers({ uid: publicProfile.uid, blockedUids: next });
+  };
+
+  const handleAcceptPolicy = async () => {
+    if (!publicProfile) return;
+    await acceptPolicyVersion({ uid: publicProfile.uid, version: CURRENT_POLICY_VERSION });
+    setPrivateInfo((prev) =>
+      prev ? { ...prev, acceptedPolicyVersion: CURRENT_POLICY_VERSION } : prev
+    );
+  };
+
+  const handleExportMyData = () => {
+    if (!publicProfile || !privateInfo) return;
+    exportMyUserData({
+      publicProfile,
+      privateInfo,
+      chats,
+      statuses,
+    });
   };
 
   const handleDeleteAccount = async () => {
@@ -1231,6 +1579,12 @@ export default function App() {
   const handleDeleteChat = async (chat: ChatRoom) => {
     if (!publicProfile) return;
     await deleteChatRoom({ chat, currentUid: publicProfile.uid });
+    setPinnedChatIds((prev) => {
+      if (!prev.includes(chat.id)) return prev;
+      const next = prev.filter((id) => id !== chat.id);
+      void updatePinnedChats({ uid: publicProfile.uid, pinnedChatIds: next }).catch(() => {});
+      return next;
+    });
     setPeerProfileModalOpen(false);
     if (activeChatId === chat.id) {
       setActiveChatId(null);
@@ -1371,6 +1725,11 @@ export default function App() {
     e?.preventDefault();
     unlockAudioNow();
     if (!activeChat || !publicProfile || preparingAttachment) return;
+    const peerUid = activeChat.participantIds.find((id) => id !== publicProfile.uid);
+    if (peerUid && privateInfo?.blockedUids?.includes(peerUid)) {
+      setChatError(t(lang, 'blockedBannerText'));
+      return;
+    }
     const textToSend = (overrideText ?? messageInput).trim();
     const attachmentToSend =
       overrideAttachment !== undefined
@@ -1707,6 +2066,35 @@ export default function App() {
     });
   };
 
+  const handleStartChatFromSearch = async (target: UserSearchResult) => {
+    if (!publicProfile || startingSearchUid) return;
+    const existingDm = chats.find(
+      (c) =>
+        c.participantIds.length === 2 &&
+        c.participantIds.includes(publicProfile.uid) &&
+        c.participantIds.includes(target.uid)
+    );
+    if (existingDm) {
+      setPreviewedUser(null);
+      openChat(existingDm.id);
+      return;
+    }
+    setStartingSearchUid(target.uid);
+    try {
+      const chatId = await startChatByUserProfile({
+        currentUser: publicProfile,
+        target,
+        existingChats: chats,
+      });
+      setPreviewedUser(null);
+      openChat(chatId);
+    } catch (err) {
+      setChatError(formatFriendlyError(err));
+    } finally {
+      setStartingSearchUid(null);
+    }
+  };
+
   const getChatDisplayName = (chat: ChatRoom): string => {
     if (!publicProfile) return chat.title;
     if (chat.creatorId === publicProfile.uid) {
@@ -1727,6 +2115,10 @@ export default function App() {
     const peerUid = chat.participantIds.find((id) => id !== publicProfile.uid);
     if (!peerUid) {
       setChatError(t(lang, 'callInviteWaitingWarn'));
+      return;
+    }
+    if (privateInfo?.blockedUids?.includes(peerUid)) {
+      setChatError(t(lang, 'blockedBannerText'));
       return;
     }
     const peer = peerProfiles[peerUid];
@@ -1752,7 +2144,7 @@ export default function App() {
 
   if (!authReady) {
     appBody = (
-      <div className="min-h-[100dvh] flex items-center justify-center bg-slate-50 dark:bg-slate-950 liquid-app-bg p-6">
+      <div className="min-h-[100dvh] flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-6">
         <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
       </div>
     );
@@ -1771,9 +2163,9 @@ export default function App() {
       );
     } else {
       appBody = (
-      <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 liquid-app-bg flex flex-col">
+      <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col">
         {/* Clean 3-zone Top Bar */}
-        <header className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-950/80 liquid-surface liquid-divider backdrop-blur-md flex items-center justify-between gap-3 sm:gap-8">
+        <header className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between gap-3 sm:gap-8">
           <KothaLinkLogo variant="compact" />
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
@@ -1784,11 +2176,10 @@ export default function App() {
           </nav>
 
           <div className="flex items-center gap-2 shrink-0">
-            <div className="hidden sm:grid grid-cols-3 gap-0.5 p-0.5 rounded-xl bg-slate-100/90 dark:bg-slate-900 liquid-control border border-slate-200 dark:border-slate-800">
+            <div className="hidden sm:grid grid-cols-2 gap-0.5 p-0.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
               {(
                 [
                   { id: 'light' as const, label: t(lang, 'lightMode'), Icon: Sun },
-                  { id: 'glass' as const, label: t(lang, 'glassMode'), Icon: Droplets },
                   { id: 'dark' as const, label: t(lang, 'darkMode'), Icon: Moon },
                 ] as const
               ).map((opt) => {
@@ -1799,15 +2190,15 @@ export default function App() {
                     key={opt.id}
                     type="button"
                     onClick={() => handleSelectThemeMode(opt.id)}
-                    className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-all whitespace-nowrap ${
+                    className={`min-h-[34px] px-3 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap ${
                       active
                         ? opt.id === 'dark'
                           ? 'bg-slate-800 text-white shadow-xs'
-                          : 'bg-white text-slate-900 liquid-pill-active shadow-xs'
+                          : 'bg-white text-slate-900 shadow-xs'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                     }`}
                   >
-                    <Icon className={`w-3.5 h-3.5 ${opt.id === 'glass' && active ? 'text-blue-600' : ''}`} />
+                    <Icon className="w-3.5 h-3.5" />
                     <span>{opt.label}</span>
                   </button>
                 );
@@ -1817,36 +2208,34 @@ export default function App() {
               type="button"
               onClick={cycleThemeMode}
               aria-label="Switch theme"
-              className="sm:hidden min-h-[40px] px-2.5 flex items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 liquid-control text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900"
+              className="sm:hidden min-h-[40px] px-2.5 flex items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900"
             >
-              {themeMode === 'glass' ? (
-                <Droplets className="w-4 h-4 text-blue-600" />
-              ) : themeMode === 'dark' ? (
+              {themeMode === 'dark' ? (
                 <Moon className="w-4 h-4" />
               ) : (
-                <Sun className="w-4 h-4" />
+                <Sun className="w-4 h-4 text-amber-500" />
               )}
-              <span>{t(lang, themeMode === 'glass' ? 'glassMode' : themeMode === 'dark' ? 'darkMode' : 'lightMode')}</span>
+              <span>{t(lang, themeMode === 'dark' ? 'darkMode' : 'lightMode')}</span>
             </button>
             <button
               type="button"
               onClick={() => setLang(lang === 'en' ? 'bn' : 'en')}
-              className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-800 liquid-control text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900 whitespace-nowrap"
+              className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900 whitespace-nowrap"
             >
               {lang === 'en' ? 'বাংলা' : 'EN'}
             </button>
           </div>
         </header>
 
-        <main className="flex-1 flex items-center justify-center p-6">
+        <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-            className="max-w-5xl w-full grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch"
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="max-w-5xl w-full grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-8 items-stretch"
           >
             {/* Left Sign-in Column */}
-            <div className="lg:col-span-7 bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-8 flex flex-col justify-between space-y-8">
+            <div className="lg:col-span-7 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-8 flex flex-col justify-between space-y-6 sm:space-y-8">
               <div className="space-y-5">
                 <KothaLinkLogo variant="hero" />
                 <div className="space-y-3 pt-1">
@@ -1913,16 +2302,41 @@ export default function App() {
                     unlockAudioNow();
                     setGuestBluetoothOpen(true);
                   }}
-                  className="w-full min-h-[44px] px-6 rounded-xl border border-slate-200 dark:border-slate-700 liquid-control hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                  className="w-full min-h-[44px] px-6 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-medium transition-colors flex items-center justify-center gap-2"
                 >
                   <Bluetooth className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                   {t(lang, 'tryBluetoothNow')}
                 </motion.button>
+
+                <div className="pt-1 space-y-2 text-center sm:text-left">
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                    {t(lang, 'policyAgreeNotice')}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-3 gap-y-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                    {(
+                      [
+                        { id: 'privacy' as const, label: t(lang, 'privacyPolicyTitle') },
+                        { id: 'terms' as const, label: t(lang, 'termsOfServiceTitle') },
+                        { id: 'safety' as const, label: t(lang, 'safetyPolicyTitle') },
+                        { id: 'security' as const, label: t(lang, 'securityInfoTitle') },
+                      ] as const
+                    ).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setLegalModalState({ open: true, tab: item.id })}
+                        className="hover:underline"
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
 
             {/* Right Channel Overview Column */}
-            <div className="lg:col-span-5 bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="lg:col-span-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between divide-y divide-slate-100 dark:divide-slate-800">
               <div className="pb-5 flex items-start gap-4">
                 <div className="w-10 h-10 rounded-xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
                   <Mail className="w-5 h-5" />
@@ -1972,7 +2386,7 @@ export default function App() {
     }
   } else {
     appBody = (
-    <div className="relative h-[100dvh] w-full overflow-hidden flex bg-slate-50 dark:bg-slate-950 liquid-app-bg text-slate-900 dark:text-slate-100">
+    <div className="relative h-[100dvh] w-full overflow-hidden flex bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
       {/* Floating Incoming Message Notification Banner (plays with tone) */}
       <AnimatePresence>
         {incomingBanner && (
@@ -1984,7 +2398,7 @@ export default function App() {
             transition={{ type: 'spring', stiffness: 420, damping: 28 }}
             className="fixed top-3 left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-sm"
           >
-            <div className="bg-white/95 dark:bg-slate-900/95 liquid-modal backdrop-blur-md border border-blue-200 dark:border-blue-800 rounded-2xl shadow-lg p-3 flex items-center gap-3">
+            <div className="bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-800 rounded-2xl shadow-lg p-3 flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => {
@@ -2025,10 +2439,10 @@ export default function App() {
       <aside
         className={`${
           isMobileDetailActive ? 'hidden md:flex' : 'flex'
-        } w-full md:w-[340px] lg:w-[360px] shrink-0 flex-col border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 liquid-surface liquid-divider h-full`}
+        } w-full md:w-[340px] lg:w-[360px] shrink-0 flex-col border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 h-full`}
       >
         {/* Sidebar Header */}
-        <div className="px-3 sm:px-4 py-3 border-b border-slate-200 dark:border-slate-800 liquid-divider flex items-center justify-between gap-2 shrink-0">
+        <div className="px-3 sm:px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -2082,8 +2496,8 @@ export default function App() {
                     initial={{ opacity: 0, y: 6, scale: 0.97 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: 4, scale: 0.97 }}
-                    transition={{ duration: 0.15 }}
-                    className="fixed top-[60px] left-3 right-3 sm:left-4 sm:right-auto sm:w-[340px] max-w-[calc(100vw-24px)] bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden"
+                    transition={{ duration: 0.14 }}
+                    className="fixed top-[60px] left-3 right-3 sm:left-4 sm:right-auto sm:w-[340px] max-w-[calc(100vw-24px)] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden"
                   >
                     <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
@@ -2154,7 +2568,7 @@ export default function App() {
                       )}
                     </div>
 
-                    <div className="p-3 bg-slate-50 dark:bg-slate-950/60 liquid-panel liquid-divider border-t border-slate-100 dark:border-slate-800 space-y-2">
+                    <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border-t border-slate-100 dark:border-slate-800 space-y-2">
                       <div className="flex items-center justify-between gap-2 text-xs">
                         <span className="text-slate-600 dark:text-slate-300 font-medium">
                           {t(lang, 'soundAlertsLabel')}
@@ -2200,7 +2614,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleTestAlert}
-                        className="w-full min-h-[34px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 liquid-control hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 transition-colors"
+                        className="w-full min-h-[34px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 transition-colors"
                       >
                         <BellRing className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
                         <span>{t(lang, 'testAlertBtn')}</span>
@@ -2229,21 +2643,30 @@ export default function App() {
             <button
               type="button"
               onClick={cycleThemeMode}
-              title={`${t(lang, 'themeLabel')}: ${t(lang, themeMode === 'glass' ? 'glassMode' : themeMode === 'dark' ? 'darkMode' : 'lightMode')}`}
+              title={`${t(lang, 'themeLabel')}: ${t(lang, themeMode === 'dark' ? 'darkMode' : 'lightMode')}`}
               aria-label="Switch theme"
               className="min-h-[38px] px-2 flex items-center justify-center gap-1 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors shrink-0"
             >
-              {themeMode === 'glass' ? (
-                <Droplets className="w-4 h-4 text-blue-600 shrink-0" />
-              ) : themeMode === 'dark' ? (
+              {themeMode === 'dark' ? (
                 <Moon className="w-4 h-4 shrink-0" />
               ) : (
                 <Sun className="w-4 h-4 text-amber-500 shrink-0" />
               )}
               <span className="hidden sm:inline">
-                {t(lang, themeMode === 'glass' ? 'glassMode' : themeMode === 'dark' ? 'darkMode' : 'lightMode')}
+                {t(lang, themeMode === 'dark' ? 'darkMode' : 'lightMode')}
               </span>
             </button>
+            {isAppLockEnabled(publicProfile.uid) && (
+              <button
+                type="button"
+                onClick={() => setAppLocked(true)}
+                title={t(lang, 'appLockNowBtn')}
+                aria-label={t(lang, 'appLockNowBtn')}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition-colors"
+              >
+                <Lock className="w-4 h-4" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -2259,7 +2682,7 @@ export default function App() {
         </div>
 
         {/* Search & Channel Filter */}
-        <div className="p-3 space-y-2.5 border-b border-slate-100 dark:border-slate-900 liquid-divider shrink-0">
+        <div className="p-3 space-y-2.5 border-b border-slate-100 dark:border-slate-900 shrink-0">
           <div className="relative">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
             <input
@@ -2267,11 +2690,26 @@ export default function App() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={t(lang, 'searchPlaceholder')}
-              className="w-full min-h-[40px] pl-9 pr-3 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-500 dark:placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              className="w-full min-h-[40px] pl-9 pr-9 rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-500 dark:placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 flex items-center justify-center"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
+          {searchQuery.trim().length > 0 && Array.from(searchQuery.trim()).length < 3 && (
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 px-1">
+              {t(lang, 'searchMinCharsHint')}
+            </p>
+          )}
 
-          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent rounded-xl">
+          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-900 border border-transparent rounded-xl">
             {(
               [
                 { id: 'all', label: t(lang, 'allChats') },
@@ -2285,7 +2723,7 @@ export default function App() {
                 onClick={() => setFilterTab(tab.id)}
                 className={`py-1.5 px-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap truncate ${
                   filterTab === tab.id
-                    ? 'bg-white dark:bg-slate-800 liquid-pill-active text-slate-900 dark:text-white shadow-sm'
+                    ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
               >
@@ -2296,7 +2734,7 @@ export default function App() {
         </div>
 
         {/* Cool Top Quick-Access Strip for BT / QR & Gemini AI */}
-        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-900 liquid-panel liquid-divider grid grid-cols-2 gap-2 shrink-0 bg-slate-50/70 dark:bg-slate-900/35">
+        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-900 grid grid-cols-2 gap-2 shrink-0 bg-slate-50/70 dark:bg-slate-900/35">
           <button
             type="button"
             onClick={() => {
@@ -2308,7 +2746,7 @@ export default function App() {
             className={`group flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left transition-all active:scale-[0.98] ${
               workspaceView === 'bluetooth'
                 ? 'bg-blue-600 border-blue-600 text-white shadow-sm shadow-blue-600/20'
-                : 'bg-gradient-to-br from-blue-50/95 to-indigo-50/85 dark:from-blue-950/45 dark:to-indigo-950/35 liquid-control border-blue-200/80 dark:border-blue-800/60 text-slate-900 dark:text-white hover:border-blue-400'
+                : 'bg-gradient-to-br from-blue-50/95 to-indigo-50/85 dark:from-blue-950/45 dark:to-indigo-950/35 border-blue-200/80 dark:border-blue-800/60 text-slate-900 dark:text-white hover:border-blue-400'
             }`}
           >
             <span
@@ -2344,14 +2782,14 @@ export default function App() {
             className={`group flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-left transition-all active:scale-[0.98] ${
               workspaceView === 'gemini'
                 ? 'bg-gradient-to-r from-indigo-600 to-violet-600 border-indigo-600 text-white shadow-sm shadow-indigo-600/20'
-                : 'bg-gradient-to-br from-violet-50/95 to-sky-50/85 dark:from-violet-950/45 dark:to-sky-950/35 liquid-control border-violet-200/80 dark:border-violet-800/60 text-slate-900 dark:text-white hover:border-violet-400'
+                : 'bg-gradient-to-br from-violet-50/95 to-sky-50/85 dark:from-violet-950/45 dark:to-sky-950/35 border-violet-200/80 dark:border-violet-800/60 text-slate-900 dark:text-white hover:border-violet-400'
             }`}
           >
             <span
               className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 ${
                 workspaceView === 'gemini'
                   ? 'bg-white/20'
-                  : 'bg-white dark:bg-slate-900 liquid-pill-active border border-violet-100 dark:border-violet-800/50 shadow-xs'
+                  : 'bg-white dark:bg-slate-900 border border-violet-100 dark:border-violet-800/50 shadow-xs'
               }`}
             >
               <GeminiLogo variant="icon" size={18} />
@@ -2385,7 +2823,7 @@ export default function App() {
           }
 
           return (
-            <div className="px-3 py-2.5 border-b border-slate-100 dark:border-slate-900 liquid-divider flex items-center gap-3 overflow-x-auto shrink-0">
+            <div className="px-3 py-2.5 border-b border-slate-100 dark:border-slate-900 flex items-center gap-3 overflow-x-auto shrink-0">
               {/* My Status */}
               <div className="flex flex-col items-center gap-1 shrink-0">
                 <div className="relative">
@@ -2462,11 +2900,9 @@ export default function App() {
                   >
                     <div className="relative w-12 h-12 rounded-full p-0.5 bg-gradient-to-tr from-emerald-500 to-blue-600">
                       {online && (
-                        <motion.span
+                        <span
                           aria-hidden="true"
-                          animate={{ scale: [1, 1.14, 1], opacity: [0.85, 0.2, 0.85] }}
-                          transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
-                          className="pointer-events-none absolute -inset-[3px] rounded-full border-2 border-emerald-500"
+                          className="pointer-events-none absolute -inset-[3px] rounded-full border-2 border-emerald-500 animate-pulse"
                         />
                       )}
                       {first.mediaType === 'image' && first.imageData ? (
@@ -2514,7 +2950,7 @@ export default function App() {
             hasNetlifyBadge ? ' has-netlify-badge' : ''
           }`}
         >
-          {filteredChats.length === 0 ? (
+          {filteredChats.length === 0 && !(searchQuery.trim() && Array.from(searchQuery.trim()).length >= 3) ? (
             <div className="py-10 px-4 text-center space-y-3">
               <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
                 {t(lang, 'noChatsTitle')}
@@ -2525,7 +2961,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  setConnectModalTab('gmail');
+                  setConnectModalTab('search');
                   setConnectModalOpen(true);
                 }}
                 className="min-h-[40px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium inline-flex items-center gap-1.5"
@@ -2535,96 +2971,225 @@ export default function App() {
               </button>
             </div>
           ) : (
-            filteredChats.map((chat) => {
-              const name = getChatDisplayName(chat);
-              const peer = getChatPeerProfile(chat);
-              const online = isPeerOnline(peer, nowTick);
-              const presenceText = formatPresenceLabel(peer, lang, nowTick);
-              const isSelected = activeChatId === chat.id && workspaceView === 'chat';
-              const hasUnread = unreadChatIds.has(chat.id);
-              return (
-                <motion.button
-                  key={chat.id}
-                  type="button"
-                  layout="position"
-                  whileTap={{ scale: 0.99 }}
-                  onClick={() => openChat(chat.id)}
-                  className={`w-full min-h-[64px] px-3 py-2.5 rounded-xl text-left flex items-center gap-3 transition-colors ${
-                    isSelected
-                      ? 'bg-slate-100 dark:bg-slate-900 liquid-row-active'
-                      : 'hover:bg-slate-50 dark:hover:bg-slate-900/50 liquid-row'
-                  }`}
-                >
-                  <UserAvatar
-                    name={name}
-                    photoUrl={peer?.photoUrl}
-                    size="lg"
-                    isOnline={online}
-                    hasUnread={hasUnread}
-                    presenceTitle={presenceText}
-                    ringColorClass="ring-white dark:ring-slate-950"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span
-                        className={`text-sm truncate ${
-                          hasUnread
-                            ? 'font-bold text-slate-950 dark:text-white'
-                            : 'font-semibold text-slate-900 dark:text-slate-100'
-                        }`}
-                      >
-                        {name}
-                      </span>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {mutedChatIds.includes(chat.id) && (
-                          <BellOff className="w-3.5 h-3.5 text-slate-400" aria-label={t(lang, 'mutedBadge')} />
-                        )}
-                        {hasUnread && (
-                          <motion.span
-                            animate={{ scale: [1, 1.35, 1], opacity: [1, 0.45, 1] }}
-                            transition={{ duration: 1.3, repeat: Infinity, ease: 'easeInOut' }}
-                            className="w-2 h-2 rounded-full bg-amber-400"
-                            aria-label="New unread message"
-                          />
-                        )}
-                        <span className="text-[11px] text-slate-400 font-mono-tabular">
-                          {formatTime(chat.lastMessageAt)}
-                        </span>
+            <>
+              {filteredChats.map((chat) => {
+                const name = getChatDisplayName(chat);
+                const peer = getChatPeerProfile(chat);
+                const online = isPeerOnline(peer, nowTick);
+                const presenceText = formatPresenceLabel(peer, lang, nowTick);
+                const isSelected = activeChatId === chat.id && workspaceView === 'chat';
+                const hasUnread = unreadChatIds.has(chat.id);
+                const isPinned = pinnedOrderMap.has(chat.id);
+                return (
+                  <div
+                    key={chat.id}
+                    className={`group relative w-full min-h-[64px] px-2 py-1.5 rounded-xl flex items-center gap-1.5 transition-colors ${
+                      isSelected
+                        ? 'bg-slate-100 dark:bg-slate-900'
+                        : isPinned
+                        ? 'bg-blue-50/70 dark:bg-blue-950/25 hover:bg-blue-50 dark:hover:bg-blue-950/40'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-900/50'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => openChat(chat.id)}
+                      className="flex-1 min-w-0 px-1 py-1 rounded-lg text-left flex items-center gap-3 active:scale-[0.99] transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+                    >
+                      <UserAvatar
+                        name={name}
+                        photoUrl={peer?.photoUrl}
+                        size="lg"
+                        isOnline={online}
+                        hasUnread={hasUnread}
+                        presenceTitle={presenceText}
+                        ringColorClass="ring-white dark:ring-slate-950"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`text-sm truncate ${
+                              hasUnread
+                                ? 'font-bold text-slate-950 dark:text-white'
+                                : 'font-semibold text-slate-900 dark:text-slate-100'
+                            }`}
+                          >
+                            {name}
+                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {mutedChatIds.includes(chat.id) && (
+                              <BellOff className="w-3.5 h-3.5 text-slate-400" aria-label={t(lang, 'mutedBadge')} />
+                            )}
+                            {hasUnread && (
+                              <span
+                                className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"
+                                aria-label="New unread message"
+                              />
+                            )}
+                            <span className="text-[11px] text-slate-400 font-mono-tabular">
+                              {formatTime(chat.lastMessageAt)}
+                            </span>
+                          </div>
+                        </div>
+                        <div
+                          className={`flex items-center gap-1.5 text-xs truncate mt-0.5 ${
+                            hasUnread
+                              ? 'text-slate-800 dark:text-slate-200 font-medium'
+                              : 'text-slate-500 dark:text-slate-400'
+                          }`}
+                        >
+                          <span
+                            className={`shrink-0 font-medium ${
+                              online ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                          >
+                            {presenceText}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="truncate">{chat.lastMessageText}</span>
+                        </div>
                       </div>
-                    </div>
-                    <div
-                      className={`flex items-center gap-1.5 text-xs truncate mt-0.5 ${
-                        hasUnread
-                          ? 'text-slate-800 dark:text-slate-200 font-medium'
-                          : 'text-slate-500 dark:text-slate-400'
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleTogglePinChat(chat.id);
+                      }}
+                      aria-label={isPinned ? t(lang, 'unpinChat') : t(lang, 'pinChat')}
+                      aria-pressed={isPinned}
+                      title={isPinned ? t(lang, 'unpinChat') : t(lang, 'pinChat')}
+                      className={`min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg shrink-0 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
+                        isPinned
+                          ? 'text-blue-600 dark:text-blue-400 bg-blue-600/10 hover:bg-blue-600/15 opacity-100'
+                          : 'text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-200/70 dark:hover:bg-slate-800 opacity-75 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100'
                       }`}
                     >
-                      <span
-                        className={`shrink-0 font-medium ${
-                          online ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'
-                        }`}
-                      >
-                        {presenceText}
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <span className="truncate">{chat.lastMessageText}</span>
-                    </div>
+                      <Pin
+                        className={`w-3.5 h-3.5 transition-transform ${isPinned ? 'rotate-45 fill-current' : ''}`}
+                      />
+                    </button>
                   </div>
-                </motion.button>
-              );
-            })
+                );
+              })}
+
+              {/* Global 3-letter Prefix User Discovery inside Sidebar Search */}
+              {Array.from(searchQuery.trim()).length >= 3 && (() => {
+                const shownPeerUids = new Set(
+                  filteredChats
+                    .flatMap((c) => c.participantIds)
+                    .filter((id) => id !== publicProfile.uid)
+                );
+                const discoverable = sidebarPeopleResults.filter((u) => !shownPeerUids.has(u.uid));
+                return (
+                  <div className="pt-2.5 mt-2 border-t border-slate-100 dark:border-slate-900 space-y-1.5">
+                    <div className="px-1.5 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      <span>{t(lang, 'peopleOnKothaLink')}</span>
+                      {sidebarSearchingPeople && (
+                        <Loader2 className="w-3 h-3 animate-spin text-blue-600" />
+                      )}
+                    </div>
+
+                    {discoverable.length === 0 && sidebarSearchingPeople ? (
+                      <div className="py-4 px-2 flex items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                        <span>{t(lang, 'searchingPeople')}</span>
+                      </div>
+                    ) : discoverable.length === 0 && !sidebarSearchingPeople ? (
+                      filteredChats.length === 0 ? (
+                        <div className="py-5 px-3 text-center space-y-2.5">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {t(lang, 'noPeopleFound')}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConnectModalTab('gmail');
+                              setConnectModalOpen(true);
+                            }}
+                            className="min-h-[36px] px-3.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium inline-flex items-center gap-1.5"
+                          >
+                            <Mail className="w-3.5 h-3.5" />
+                            <span>{t(lang, 'cardGmailAction')}</span>
+                          </button>
+                        </div>
+                      ) : null
+                    ) : (
+                      discoverable.map((person) => {
+                        const online =
+                          person.showOnlineStatus !== false && person.onlineStatus === 'online';
+                        const existingDm = chats.find(
+                          (c) =>
+                            c.participantIds.length === 2 &&
+                            c.participantIds.includes(publicProfile.uid) &&
+                            c.participantIds.includes(person.uid)
+                        );
+                        const isBusy = startingSearchUid === person.uid;
+                        return (
+                          <div
+                            key={`search-user-${person.uid}`}
+                            className="w-full min-h-[60px] px-2 py-1.5 rounded-xl bg-slate-50/75 dark:bg-slate-900/45 hover:bg-blue-50/70 dark:hover:bg-blue-950/30 border border-slate-200/70 dark:border-slate-800/70 flex items-center gap-2 transition-colors"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setPreviewedUser(person)}
+                              className="flex-1 min-w-0 flex items-center gap-2.5 text-left rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+                            >
+                              <UserAvatar
+                                name={person.displayName}
+                                photoUrl={person.photoUrl}
+                                size="md"
+                                isOnline={online}
+                                ringColorClass="ring-white dark:ring-slate-950"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                    {person.displayName}
+                                  </span>
+                                  {existingDm && (
+                                    <UserCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                  {person.maskedEmail || person.bio || t(lang, 'noBioYet')}
+                                </p>
+                              </div>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={Boolean(startingSearchUid)}
+                              onClick={() => void handleStartChatFromSearch(person)}
+                              className="min-h-[34px] px-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center gap-1 shrink-0 transition-colors"
+                            >
+                              {isBusy ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <MessageSquare className="w-3 h-3" />
+                              )}
+                              <span>{existingDm ? t(lang, 'openChatBtn') : t(lang, 'messageBtn')}</span>
+                            </button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                );
+              })()}
+            </>
           )}
         </div>
 
         {/* Bottom Profile Bar (Desktop) */}
-        <div className="hidden md:flex p-3 border-t border-slate-200 dark:border-slate-800 liquid-divider items-center justify-between gap-3 shrink-0">
+        <div className="hidden md:flex p-3 border-t border-slate-200 dark:border-slate-800 items-center justify-between gap-3 shrink-0">
           <button
             type="button"
             onClick={() => {
               setProfileModalTab('profile');
               setProfileModalOpen(true);
             }}
-            className="flex-1 min-w-0 flex items-center gap-2.5 p-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-900 liquid-row text-left transition-colors"
+            className="flex-1 min-w-0 flex items-center gap-2.5 p-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-900 text-left transition-colors"
           >
             <UserAvatar
               name={publicProfile.displayName}
@@ -2658,7 +3223,7 @@ export default function App() {
         </div>
 
         {/* Bottom Action Dock: Keep Chats & New Chat on Left Side (Right stays clear of Netlify badge) */}
-        <div className="shrink-0 bg-white/95 dark:bg-slate-950/95 liquid-surface liquid-divider backdrop-blur-md border-t border-slate-200 dark:border-slate-800">
+        <div className="shrink-0 bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800">
           <nav className="h-16 w-[52%] md:w-full grid grid-cols-2 items-center">
             <button
               type="button"
@@ -2676,7 +3241,7 @@ export default function App() {
               type="button"
               onClick={() => {
                 unlockAudioNow();
-                setConnectModalTab('gmail');
+                setConnectModalTab('search');
                 setConnectModalOpen(true);
               }}
               className="h-full flex flex-col items-center justify-center gap-0.5 text-slate-600 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
@@ -2692,7 +3257,7 @@ export default function App() {
       <main
         className={`${
           isMobileDetailActive ? 'flex' : 'hidden md:flex'
-        } flex-1 flex-col h-full bg-slate-50 dark:bg-slate-950 liquid-app-bg overflow-hidden`}
+        } flex-1 flex-col h-full bg-slate-50 dark:bg-slate-950 overflow-hidden`}
       >
         <AnimatePresence mode="wait">
         {workspaceView === 'bluetooth' ? (
@@ -2750,7 +3315,7 @@ export default function App() {
               const file = e.dataTransfer.files?.[0];
               if (file) void handleAttachmentPicked(file);
             }}
-            className="relative flex-1 flex flex-col h-full bg-white dark:bg-slate-950 liquid-app-bg overflow-hidden"
+            className="relative flex-1 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden"
           >
             {/* Drag & Drop File Overlay */}
             <AnimatePresence>
@@ -2760,7 +3325,7 @@ export default function App() {
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.14 }}
-                  className="absolute inset-0 z-30 bg-blue-600/10 backdrop-blur-xs border-2 border-dashed border-blue-600 rounded-2xl m-3 flex flex-col items-center justify-center gap-2 pointer-events-none"
+                  className="absolute inset-0 z-30 bg-blue-600/15 border-2 border-dashed border-blue-600 rounded-2xl m-3 flex flex-col items-center justify-center gap-2 pointer-events-none"
                 >
                   <Upload className="w-8 h-8 text-blue-600 dark:text-blue-400" />
                   <p className="text-sm font-semibold text-blue-700 dark:text-blue-300">
@@ -2773,12 +3338,16 @@ export default function App() {
             {/* Active Chat Header (Blinking Online Ring + Voice/Video Call + Peer Profile) */}
             {(() => {
               const activePeer = getChatPeerProfile(activeChat);
+              const activePeerUid = activeChat.participantIds.find((id) => id !== publicProfile.uid);
+              const isActivePeerBlocked = Boolean(
+                activePeerUid && privateInfo.blockedUids?.includes(activePeerUid)
+              );
               const activePeerOnline = isPeerOnline(activePeer, nowTick);
               const activePresenceText = formatPresenceLabel(activePeer, lang, nowTick);
-              const canCallPeer = activeChat.participantIds.length >= 2;
+              const canCallPeer = activeChat.participantIds.length >= 2 && !isActivePeerBlocked;
               return (
-                <header className="px-3 sm:px-6 py-3 border-b border-slate-200 dark:border-slate-800 liquid-surface flex items-center justify-between gap-2 shrink-0">
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                <header className="px-2.5 sm:px-6 py-2.5 sm:py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between gap-1.5 sm:gap-2 shrink-0">
+                  <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
                     <button
                       type="button"
                       onClick={() => {
@@ -2786,7 +3355,7 @@ export default function App() {
                         setWorkspaceView('hub');
                       }}
                       aria-label={t(lang, 'backBtn')}
-                      className="min-h-[40px] px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold shrink-0 transition-colors"
+                      className="min-h-[38px] min-w-[38px] sm:min-h-[40px] px-2 sm:px-2.5 flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold shrink-0 transition-colors"
                     >
                       <ArrowLeft className="w-4 h-4 shrink-0" />
                       <span className="hidden sm:inline">{t(lang, 'backBtn')}</span>
@@ -2795,7 +3364,7 @@ export default function App() {
                       type="button"
                       onClick={() => setPeerProfileModalOpen(true)}
                       title={t(lang, 'viewProfile')}
-                      className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 text-left rounded-xl p-1 -m-1 hover:bg-slate-100/80 dark:hover:bg-slate-900/70 transition-colors"
+                      className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 text-left rounded-xl p-1 -m-1 hover:bg-slate-100/80 dark:hover:bg-slate-900/70 transition-colors"
                     >
                       <UserAvatar
                         name={getChatDisplayName(activeChat)}
@@ -2869,8 +3438,8 @@ export default function App() {
                             </span>
                             {activeChat.participantIds.length === 1 && activeChat.inviteCode && (
                               <>
-                                <span aria-hidden="true">·</span>
-                                <span className="text-amber-600 dark:text-amber-400 truncate">
+                                <span className="hidden xs:inline" aria-hidden="true">·</span>
+                                <span className="hidden xs:inline text-amber-600 dark:text-amber-400 truncate">
                                   {t(lang, 'inviteWaiting')}
                                 </span>
                               </>
@@ -2890,7 +3459,7 @@ export default function App() {
                           onClick={() => handleStartCall(activeChat, 'audio')}
                           title={t(lang, 'voiceCall')}
                           aria-label={t(lang, 'voiceCall')}
-                          className="min-h-[40px] min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/70 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-700 dark:text-emerald-400 flex items-center justify-center gap-1.5 text-xs font-semibold whitespace-nowrap transition-colors"
+                          className="min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/70 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-700 dark:text-emerald-400 flex items-center justify-center gap-1.5 text-xs font-semibold whitespace-nowrap transition-colors"
                         >
                           <Phone className="w-4 h-4 shrink-0" />
                           <span className="hidden xl:inline">{t(lang, 'voiceCall')}</span>
@@ -2901,7 +3470,7 @@ export default function App() {
                           onClick={() => handleStartCall(activeChat, 'video')}
                           title={t(lang, 'videoCall')}
                           aria-label={t(lang, 'videoCall')}
-                          className="min-h-[40px] min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/70 hover:bg-blue-100 dark:hover:bg-blue-900/50 text-blue-700 dark:text-blue-400 flex items-center justify-center gap-1.5 text-xs font-semibold whitespace-nowrap transition-colors"
+                          className="min-h-[38px] min-w-[38px] sm:min-h-[40px] sm:min-w-[40px] px-2 sm:px-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/70 hover:bg-blue-100 dark:hover:bg-blue-900/50 text-blue-700 dark:text-blue-400 flex items-center justify-center gap-1.5 text-xs font-semibold whitespace-nowrap transition-colors"
                         >
                           <Video className="w-4 h-4 shrink-0" />
                           <span className="hidden xl:inline">{t(lang, 'videoCall')}</span>
@@ -2912,43 +3481,62 @@ export default function App() {
                     {activeChat.inviteCode && activeChat.participantIds.length === 1 && (
                       <>
                         {activeChat.channel === 'gmail' && (
-                          <a
-                            href={`mailto:${encodeURIComponent(
-                              pendingEmailsByChat[activeChat.id] || ''
-                            )}?subject=${encodeURIComponent(
-                              `${publicProfile.displayName} sent you a message on KothaLink`
-                            )}&body=${encodeURIComponent(
-                              `Hi! I sent you a message on KothaLink.\n\nSign in with your Gmail (${pendingEmailsByChat[activeChat.id] || 'this email'}) at ${getPublicAppOrigin()} to see it right away, or use invite link: ${getInviteUrl(activeChat.inviteCode)}`
-                            )}`}
-                            className="min-h-[40px] px-2.5 sm:px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 text-xs font-medium text-blue-700 dark:text-blue-300 flex items-center gap-1.5 whitespace-nowrap"
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const savedEmail =
+                                pendingEmailsByChat[activeChat.id] ||
+                                peerEmailsByChat[activeChat.id] ||
+                                '';
+                              const latestPreview =
+                                activeChat.lastMessageText ||
+                                messages[messages.length - 1]?.text ||
+                                (lang === 'bn'
+                                  ? 'KothaLink-এ আপনাকে মেসেজ করেছেন'
+                                  : 'Sent you a message on KothaLink');
+                              setOfflineEmailPrompt({
+                                chatId: activeChat.id,
+                                peerName: getChatDisplayName(activeChat),
+                                presenceText: t(lang, 'inviteWaiting'),
+                                messagePreview: latestPreview,
+                                toEmail: savedEmail,
+                                editingEmail: !savedEmail,
+                                sending: false,
+                                error: '',
+                              });
+                            }}
+                            title={t(lang, 'notifyViaEmail')}
+                            aria-label={t(lang, 'notifyViaEmail')}
+                            className="min-h-[36px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 text-xs font-medium text-blue-700 dark:text-blue-300 flex items-center gap-1.5 whitespace-nowrap"
                           >
-                            <Mail className="w-3.5 h-3.5" />
+                            <Mail className="w-3.5 h-3.5 shrink-0" />
                             <span className="hidden sm:inline">{t(lang, 'notifyViaEmail')}</span>
-                          </a>
+                          </button>
                         )}
                         <button
                           type="button"
                           onClick={() => copyChatInviteLink(activeChat)}
-                          className="min-h-[40px] px-2.5 sm:px-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5 whitespace-nowrap"
+                          className="min-h-[36px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1 whitespace-nowrap"
                         >
                           {copiedInviteId === activeChat.id ? (
                             <>
-                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                              <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                               <span className="hidden sm:inline">{t(lang, 'copied')}</span>
                             </>
                           ) : (
                             <>
-                              <Copy className="w-3.5 h-3.5" />
-                              <span>{activeChat.inviteCode}</span>
+                              <Copy className="w-3.5 h-3.5 shrink-0" />
+                              <span className="font-mono-tabular text-[11px] sm:text-xs">{activeChat.inviteCode}</span>
                             </>
                           )}
                         </button>
                         <button
                           type="button"
                           onClick={() => shareChatInvite(activeChat)}
-                          className="min-h-[40px] px-2.5 sm:px-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap"
+                          aria-label="Share invite link"
+                          className="min-h-[36px] sm:min-h-[40px] px-2 sm:px-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap"
                         >
-                          <Share2 className="w-3.5 h-3.5" />
+                          <Share2 className="w-3.5 h-3.5 shrink-0" />
                           <span className="hidden sm:inline">Share Link</span>
                         </button>
                       </>
@@ -2966,12 +3554,107 @@ export default function App() {
               </div>
             )}
 
+            {/* Top In-Conversation Keyword Search & Highlight Bar */}
+            <div className="px-2.5 sm:px-6 py-2 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center gap-1.5 sm:gap-2 shrink-0">
+              <div className="relative flex-1 min-w-0 flex items-center">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none" />
+                <input
+                  ref={chatSearchInputRef}
+                  type="text"
+                  value={chatSearchQuery}
+                  onChange={(e) => {
+                    setChatSearchQuery(e.target.value);
+                    setChatSearchMatchIdx(0);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setChatSearchQuery('');
+                      setChatSearchMatchIdx(0);
+                    } else if (e.key === 'Enter' && matchingMessageIds.length > 0) {
+                      e.preventDefault();
+                      setChatSearchMatchIdx((prev) =>
+                        e.shiftKey
+                          ? (prev - 1 + matchingMessageIds.length) % matchingMessageIds.length
+                          : (prev + 1) % matchingMessageIds.length
+                      );
+                    }
+                  }}
+                  placeholder={t(lang, 'chatSearchPlaceholder')}
+                  aria-label={t(lang, 'chatSearchPlaceholder')}
+                  className="w-full min-h-[36px] pl-8 pr-8 rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent focus:border-blue-500 dark:focus:border-blue-500 text-xs sm:text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none transition-colors"
+                />
+                {chatSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChatSearchQuery('');
+                      setChatSearchMatchIdx(0);
+                    }}
+                    aria-label={t(lang, 'chatSearchClear')}
+                    title={t(lang, 'chatSearchClear')}
+                    className="absolute right-1.5 w-6 h-6 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 flex items-center justify-center transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {trimmedChatSearch && (
+                <div className="flex items-center gap-1 shrink-0">
+                  <span className="px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-900 text-[11px] font-mono-tabular font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                    {matchingMessageIds.length > 0
+                      ? `${Math.min(chatSearchMatchIdx + 1, matchingMessageIds.length)}/${matchingMessageIds.length}`
+                      : `0 ${t(lang, 'chatSearchMatchesLabel')}`}
+                  </span>
+
+                  {matchingMessageIds.length > 1 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setChatSearchMatchIdx(
+                            (prev) => (prev - 1 + matchingMessageIds.length) % matchingMessageIds.length
+                          )
+                        }
+                        aria-label="Previous match"
+                        className="min-h-[34px] min-w-[30px] rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center justify-center transition-colors"
+                      >
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setChatSearchMatchIdx((prev) => (prev + 1) % matchingMessageIds.length)
+                        }
+                        aria-label="Next match"
+                        className="min-h-[34px] min-w-[30px] rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center justify-center transition-colors"
+                      >
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </button>
+                    </>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setChatSearchFilterOnly((v) => !v)}
+                    className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                      chatSearchFilterOnly
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {chatSearchFilterOnly ? t(lang, 'chatSearchFilterOnly') : t(lang, 'chatSearchShowAll')}
+                  </button>
+                </div>
+              )}
+            </div>
+
             {/* Message Feed + Floating New Message Button */}
             <div className="relative flex-1 flex flex-col overflow-hidden min-h-0">
               <div
                 ref={feedScrollRef}
                 onScroll={handleFeedScroll}
-                className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 bg-slate-50/50 dark:bg-slate-950 liquid-panel scroll-smooth"
+                className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 bg-slate-50/50 dark:bg-slate-950"
               >
                 {renderedMessages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-4">
@@ -2989,15 +3672,36 @@ export default function App() {
                           key={quick}
                           type="button"
                           onClick={() => handleSendMessage(undefined, quick)}
-                          className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 liquid-control border border-slate-200 dark:border-slate-800 hover:border-blue-500 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors"
+                          className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-blue-500 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors"
                         >
                           {quick}
                         </button>
                       ))}
                     </div>
                   </div>
+                ) : displayedMessages.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-3">
+                    <div className="w-10 h-10 rounded-2xl bg-slate-200/70 dark:bg-slate-800 text-slate-500 dark:text-slate-400 flex items-center justify-center">
+                      <Search className="w-5 h-5" />
+                    </div>
+                    <p className="text-sm text-slate-600 dark:text-slate-300 font-medium">
+                      {t(lang, 'chatSearchNoMatches')}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChatSearchQuery('');
+                        setChatSearchMatchIdx(0);
+                      }}
+                      className="min-h-[36px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
+                    >
+                      {t(lang, 'chatSearchClear')}
+                    </button>
+                  </div>
                 ) : (
-                  renderedMessages.map((msg, idx) => (
+                  displayedMessages.map((msg) => {
+                    const realIdx = renderedMessageIndexMap.get(msg.id) ?? -1;
+                    return (
                     <MessageBubble
                       key={msg.id}
                       id={msg.id}
@@ -3017,6 +3721,8 @@ export default function App() {
                       optimistic={msg.optimistic}
                       justSent={justSentIds.has(msg.id)}
                       justArrived={justArrivedIds.has(msg.id)}
+                      searchQuery={trimmedChatSearch}
+                      isActiveSearchMatch={Boolean(trimmedChatSearch && activeSearchMatchId === msg.id)}
                       reactions={reactionsByMessage.get(msg.id) || []}
                       onReact={(emoji) =>
                         void toggleMessageReaction({
@@ -3038,8 +3744,8 @@ export default function App() {
                         deleteChatMessage({
                           chat: activeChat,
                           message: msg,
-                          previousMessage: idx > 0 ? renderedMessages[idx - 1] : null,
-                          isLatest: idx === renderedMessages.length - 1,
+                          previousMessage: realIdx > 0 ? renderedMessages[realIdx - 1] : null,
+                          isLatest: realIdx === renderedMessages.length - 1,
                           currentUid: publicProfile.uid,
                         })
                       }
@@ -3048,7 +3754,8 @@ export default function App() {
                         resolveChunkedAttachment(activeChat.id, msgId, marker)
                       }
                     />
-                  ))
+                    );
+                  })
                 )}
 
                 {/* Real-time Animated Peer Typing Indicator */}
@@ -3062,7 +3769,7 @@ export default function App() {
                       transition={{ type: 'spring', stiffness: 360, damping: 28 }}
                       className="flex items-center gap-2 pt-1"
                     >
-                      <div className="px-4 py-2.5 rounded-2xl bg-white dark:bg-slate-900 liquid-bubble-peer border border-slate-200 dark:border-slate-800 flex items-center gap-2.5 shadow-sm">
+                      <div className="px-4 py-2.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-2.5 shadow-sm">
                         <span className="w-6 h-6 rounded-full bg-blue-600/10 text-blue-600 dark:text-blue-400 text-[11px] font-bold flex items-center justify-center shrink-0">
                           {activePeerTypers[0].displayName.slice(0, 1).toUpperCase()}
                         </span>
@@ -3152,7 +3859,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
                   transition={{ duration: 0.15 }}
-                  className="px-4 sm:px-6 py-2.5 bg-slate-50 dark:bg-slate-900 liquid-surface liquid-divider border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3"
+                  className="px-4 sm:px-6 py-2.5 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3"
                 >
                   {uploadProgress !== null ? (
                     <div className="flex-1 flex items-center gap-3">
@@ -3225,7 +3932,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
                   transition={{ duration: 0.14 }}
-                  className="px-4 sm:px-6 py-2 bg-white dark:bg-slate-900 liquid-surface liquid-divider border-t border-slate-200 dark:border-slate-800 flex items-center gap-2 overflow-x-auto"
+                  className="px-4 sm:px-6 py-2 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center gap-2 overflow-x-auto"
                 >
                   {QUICK_EMOJIS.map((em) => (
                     <button
@@ -3278,19 +3985,42 @@ export default function App() {
               }}
             />
 
-            {/* Organized 2-Row Composer Dock: Full-width Input + Voice beside Send above, Photo/Video/Emoji/File in Bottom-Left beside Netlify Badge */}
+            {/* Organized 2-Row Composer Dock (or Blocked Contact Banner) */}
             <div
-              className={`border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 liquid-surface liquid-divider shrink-0 chat-composer-container${
+              className={`border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shrink-0 chat-composer-container${
                 hasNetlifyBadge ? ' has-netlify-badge' : ''
               }`}
             >
+              {(() => {
+                const composerPeerUid = activeChat.participantIds.find((id) => id !== publicProfile.uid);
+                const composerPeerBlocked = Boolean(
+                  composerPeerUid && privateInfo.blockedUids?.includes(composerPeerUid)
+                );
+                if (composerPeerBlocked && composerPeerUid) {
+                  return (
+                    <div className="px-4 py-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 bg-amber-50/80 dark:bg-amber-950/25">
+                      <div className="flex items-center gap-2.5 text-xs font-medium text-amber-800 dark:text-amber-300">
+                        <Ban className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                        <span>{t(lang, 'blockedBannerText')}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleBlockUid(composerPeerUid, false)}
+                        className="min-h-[38px] px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
+                      >
+                        {t(lang, 'unblockUserBtn')}
+                      </button>
+                    </div>
+                  );
+                }
+                return (
               <form
                 onSubmit={(e) => handleSendMessage(e)}
                 className="px-2.5 pt-2 pb-1.5 sm:px-4 sm:pt-3 sm:pb-2.5 space-y-2"
               >
                 {/* Row 1: Full-width Input / Live Voice Waveform + Voice Button next to Send Button */}
                 {isRecordingVoice ? (
-                  <div className="flex items-center gap-2 p-2 rounded-2xl bg-red-50/90 dark:bg-red-950/35 border border-red-200 dark:border-red-900/70 backdrop-blur-md">
+                  <div className="flex items-center gap-2 p-2 rounded-2xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900/70">
                     <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse shrink-0 ml-1" />
                     <span className="text-xs font-mono-tabular font-bold text-red-600 dark:text-red-400 shrink-0">
                       {Math.floor(voiceRecordSeconds / 60)}:
@@ -3300,7 +4030,7 @@ export default function App() {
                     <div
                       role="img"
                       aria-label={t(lang, 'liveWaveLabel')}
-                      className="flex-1 min-w-[60px] h-8 px-1.5 rounded-xl bg-white/75 dark:bg-slate-900/60 border border-red-200/70 dark:border-red-900/40 flex items-center justify-between gap-[2px] overflow-hidden"
+                      className="flex-1 min-w-[60px] h-8 px-1.5 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-red-200/70 dark:border-red-900/40 flex items-center justify-between gap-[2px] overflow-hidden"
                     >
                       {voiceWaveform.map((level, idx) => (
                         <span
@@ -3331,7 +4061,7 @@ export default function App() {
                     </button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1.5 sm:gap-2 p-1.5 rounded-2xl bg-slate-100 dark:bg-slate-900 liquid-control border border-slate-200 dark:border-slate-800 focus-within:border-blue-500 dark:focus-within:border-blue-500 transition-colors">
+                  <div className="flex items-center gap-1.5 sm:gap-2 p-1.5 rounded-2xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 focus-within:border-blue-500 dark:focus-within:border-blue-500 transition-colors">
                     <div className="relative flex-1 min-w-0 flex items-center">
                       <textarea
                         rows={1}
@@ -3366,34 +4096,8 @@ export default function App() {
                           }
                         }}
                         placeholder={t(lang, 'typeMessage')}
-                        className="w-full min-h-[40px] max-h-28 py-2.5 px-2.5 pr-8 bg-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none leading-snug"
+                        className="w-full min-h-[40px] max-h-28 py-2.5 px-2.5 bg-transparent text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none leading-snug"
                       />
-                      {/* Live Typing Wave Feedback while User Types */}
-                      <AnimatePresence>
-                        {messageInput.trim().length > 0 && (
-                          <motion.span
-                            initial={{ opacity: 0, scale: 0.7 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.7 }}
-                            transition={{ duration: 0.14 }}
-                            aria-hidden="true"
-                            className="absolute right-2 flex items-center gap-0.5 pointer-events-none"
-                          >
-                            {[0, 1, 2].map((bar) => (
-                              <motion.span
-                                key={bar}
-                                animate={{ scaleY: [0.5, 1.35, 0.5] }}
-                                transition={{
-                                  duration: 0.65,
-                                  repeat: Infinity,
-                                  delay: bar * 0.12,
-                                }}
-                                className="w-0.5 h-3 rounded-full bg-blue-500/80 dark:bg-blue-400/80"
-                              />
-                            ))}
-                          </motion.span>
-                        )}
-                      </AnimatePresence>
                     </div>
 
                     {/* Voice Record Button right next to Send */}
@@ -3448,7 +4152,7 @@ export default function App() {
                     onClick={() => imageInputRef.current?.click()}
                     title={t(lang, 'uploadImage')}
                     aria-label={t(lang, 'uploadImage')}
-                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0"
+                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0"
                   >
                     <ImagePlus className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
                     <span>{t(lang, 'photoBtn')}</span>
@@ -3460,8 +4164,8 @@ export default function App() {
                     aria-label="Toggle emojis"
                     className={`min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl transition-colors shrink-0 ${
                       showEmojiPicker
-                        ? 'bg-blue-50 dark:bg-blue-950/50 liquid-pill-active text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
-                        : 'bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800'
+                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
+                        : 'bg-slate-100 dark:bg-slate-900 border border-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800'
                     }`}
                   >
                     <Smile className="w-4 h-4" />
@@ -3472,12 +4176,14 @@ export default function App() {
                     onClick={() => fileInputRef.current?.click()}
                     title={t(lang, 'uploadFile')}
                     aria-label={t(lang, 'uploadFile')}
-                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-900 liquid-control border border-transparent text-emerald-600 dark:text-emerald-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors shrink-0"
+                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent text-emerald-600 dark:text-emerald-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors shrink-0"
                   >
                     <Paperclip className="w-4 h-4 shrink-0" />
                   </motion.button>
                 </div>
               </form>
+                );
+              })()}
             </div>
           </motion.div>
         ) : (
@@ -3506,8 +4212,8 @@ export default function App() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
-                  transition={{ duration: 0.22, delay: 0.03, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  transition={{ duration: 0.18, delay: 0.02, ease: [0.16, 1, 0.3, 1] }}
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center">
@@ -3538,8 +4244,8 @@ export default function App() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
-                  transition={{ duration: 0.22, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  transition={{ duration: 0.18, delay: 0.05, ease: [0.16, 1, 0.3, 1] }}
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-emerald-600/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
@@ -3570,8 +4276,8 @@ export default function App() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
-                  transition={{ duration: 0.22, delay: 0.13, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 liquid-card border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  transition={{ duration: 0.18, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center justify-center">
@@ -3591,7 +4297,7 @@ export default function App() {
                       setBtInitialMode('bluetooth');
                       setWorkspaceView('bluetooth');
                     }}
-                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 liquid-control hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap"
                   >
                     {t(lang, 'cardBtAction')}
                   </motion.button>
@@ -3599,7 +4305,7 @@ export default function App() {
               </div>
 
               {/* Join by Invite Code & Gemini AI Quick Bars */}
-              <div className="pt-4 flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 dark:border-slate-800 liquid-divider">
+              <div className="pt-4 flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 dark:border-slate-800">
                 <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                   <KeyRound className="w-4 h-4" />
                   <span>Got an invite code from a friend?</span>
@@ -3618,7 +4324,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void sharePublicApp()}
-                    className="min-h-[38px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 liquid-control hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium flex items-center gap-2 whitespace-nowrap transition-colors"
+                    className="min-h-[38px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium flex items-center gap-2 whitespace-nowrap transition-colors"
                   >
                     {copiedAppLink ? (
                       <>
@@ -3669,6 +4375,8 @@ export default function App() {
               lang={lang}
               currentUser={publicProfile}
               existingChats={chats}
+              knownProfiles={peerProfiles}
+              blockedUids={privateInfo.blockedUids || []}
               onClose={() => {
                 setConnectModalOpen(false);
                 setDeepInviteCode('');
@@ -3682,7 +4390,128 @@ export default function App() {
                 }
                 openChat(chatId);
               }}
+              onPreviewUserProfile={(person) => {
+                setConnectModalOpen(false);
+                setPreviewedUser(person);
+              }}
             />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Discovered User Profile Preview Modal */}
+      <AnimatePresence>
+        {previewedUser && (
+          <motion.div
+            key="discovered-user-preview"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            onClick={() => setPreviewedUser(null)}
+            className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.97, y: 18 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.97, y: 14 }}
+              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-2xl mobile-sheet-safe"
+            >
+              <div className="sm:hidden flex justify-center pt-2.5 pb-0.5">
+                <span className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+              </div>
+              <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewedUser(null)}
+                    aria-label={t(lang, 'backBtn')}
+                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                    {t(lang, 'userProfilePreviewTitle')}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPreviewedUser(null)}
+                  aria-label="Close"
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="p-5 flex flex-col items-center text-center space-y-4">
+                {(() => {
+                  const isOnline =
+                    previewedUser.showOnlineStatus !== false &&
+                    previewedUser.onlineStatus === 'online';
+                  const existingDm = chats.find(
+                    (c) =>
+                      c.participantIds.length === 2 &&
+                      c.participantIds.includes(publicProfile.uid) &&
+                      c.participantIds.includes(previewedUser.uid)
+                  );
+                  const isBusy = startingSearchUid === previewedUser.uid;
+                  return (
+                    <>
+                      <UserAvatar
+                        name={previewedUser.displayName}
+                        photoUrl={previewedUser.photoUrl}
+                        size="xl"
+                        isOnline={isOnline}
+                        ringColorClass="ring-white dark:ring-slate-900"
+                      />
+                      <div className="space-y-1">
+                        <h4 className="text-lg font-bold text-slate-900 dark:text-white">
+                          {previewedUser.displayName}
+                        </h4>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                          {isOnline ? (
+                            <span className="text-emerald-600 dark:text-emerald-400">
+                              ● {t(lang, 'online')}
+                            </span>
+                          ) : (
+                            <span>{t(lang, 'offline')}</span>
+                          )}
+                          {previewedUser.maskedEmail ? (
+                            <>
+                              <span className="mx-1.5" aria-hidden="true">·</span>
+                              <span className="font-mono-tabular">{previewedUser.maskedEmail}</span>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="w-full p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-left">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          {t(lang, 'bioLabel')}
+                        </div>
+                        <p className="text-xs text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">
+                          {previewedUser.bio?.trim() ? previewedUser.bio : t(lang, 'noBioYet')}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={Boolean(startingSearchUid)}
+                        onClick={() => void handleStartChatFromSearch(previewedUser)}
+                        className="w-full min-h-[44px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+                      >
+                        {isBusy ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <MessageSquare className="w-4 h-4" />
+                        )}
+                        <span>{existingDm ? t(lang, 'openChatBtn') : t(lang, 'startChatBtn')}</span>
+                      </button>
+                    </>
+                  );
+                })()}
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -3702,13 +4531,12 @@ export default function App() {
               initialTab={profileModalTab}
               lang={lang}
               themeMode={themeMode}
-              glassBlur={glassBlur}
-              glassSaturation={glassSaturation}
               soundOn={soundOn}
               notifPermission={notifPermission}
               enterToSend={enterToSend}
               publicProfile={publicProfile}
               privateInfo={privateInfo}
+              peerProfiles={peerProfiles}
               onClose={() => setProfileModalOpen(false)}
               onUpdated={(updates) => {
                 setPublicProfile((prev) =>
@@ -3718,6 +4546,7 @@ export default function App() {
                         displayName: updates.displayName,
                         bio: updates.bio,
                         showOnlineStatus: updates.showOnlineStatus,
+                        searchable: updates.searchable,
                       }
                     : prev
                 );
@@ -3726,21 +4555,21 @@ export default function App() {
                     ? {
                         ...prev,
                         language: updates.language,
+                        readReceiptsEnabled: updates.readReceiptsEnabled,
                       }
                     : prev
                 );
                 setLang(updates.language);
               }}
               onChangeTheme={(mode) => handleSelectThemeMode(mode)}
-              onChangeGlassBlur={(blur) => setGlassBlur(blur)}
-              onChangeGlassSaturation={(sat) => setGlassSaturation(sat)}
-              onResetGlass={() => {
-                setGlassBlur(14);
-                setGlassSaturation(205);
-              }}
               onToggleSound={toggleSound}
               onRequestBgNotifications={() => void handleRequestBgNotifications()}
               onToggleEnterToSend={toggleEnterToSend}
+              onUnblockUser={(uid) => handleToggleBlockUid(uid, false)}
+              onOpenLegalModal={(tab) => setLegalModalState({ open: true, tab })}
+              onExportData={handleExportMyData}
+              onLockAppNow={() => setAppLocked(true)}
+              onAppLockChanged={() => setAppLockVersion((v) => v + 1)}
               onSignOut={handleSignOut}
               onDeleteAccount={handleDeleteAccount}
             />
@@ -3748,13 +4577,14 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Contact / Peer Profile Modal (with active 24h statuses + Delete Chat) */}
+      {/* Contact / Peer Profile Modal (with active 24h statuses + Safety + Delete Chat) */}
       <AnimatePresence>
         {peerProfileModalOpen && activeChat && (() => {
           const activePeer = getChatPeerProfile(activeChat);
           const peerUid = activeChat.participantIds.find((id) => id !== publicProfile.uid);
           const peerStatuses = peerUid ? statuses.filter((s) => s.uid === peerUid) : [];
           const peerOnline = isPeerOnline(activePeer, nowTick);
+          const peerIsBlocked = Boolean(peerUid && privateInfo.blockedUids?.includes(peerUid));
           return (
             <motion.div
               key="peer-profile-wrap"
@@ -3775,9 +4605,12 @@ export default function App() {
                 peerStatuses={peerStatuses}
                 isChatMuted={mutedChatIds.includes(activeChat.id)}
                 isChatSoundMuted={mutedSoundChatIds.includes(activeChat.id)}
+                isPinned={pinnedOrderMap.has(activeChat.id)}
+                isBlocked={peerIsBlocked}
                 savedPeerEmail={peerEmailsByChat[activeChat.id] || pendingEmailsByChat[activeChat.id] || ''}
                 viewerEmail={privateInfo?.email || firebaseUser?.email || ''}
                 autoOfferOfflineGmail={!offlineAlertOptOutChats.includes(activeChat.id)}
+                officialMailerReady={officialMailerReady}
                 onToggleChatMute={() => {
                   setMutedChatIds((prev) =>
                     prev.includes(activeChat.id)
@@ -3792,6 +4625,22 @@ export default function App() {
                       : [...prev, activeChat.id]
                   );
                 }}
+                onTogglePinChat={() => handleTogglePinChat(activeChat.id)}
+                onToggleBlock={
+                  peerUid ? () => handleToggleBlockUid(peerUid) : undefined
+                }
+                onOpenReport={
+                  peerUid
+                    ? () => {
+                        setPeerProfileModalOpen(false);
+                        setReportTarget({
+                          uid: peerUid,
+                          name: getChatDisplayName(activeChat),
+                          chatId: activeChat.id,
+                        });
+                      }
+                    : undefined
+                }
                 onSavePeerEmail={(email) => {
                   if (email) {
                     setPeerEmailsByChat((prev) => ({ ...prev, [activeChat.id]: email }));
@@ -3839,6 +4688,29 @@ export default function App() {
           );
         })()}
       </AnimatePresence>
+
+      {/* Report User & Safety Modal */}
+      {reportTarget && (
+        <ReportUserModal
+          isOpen={Boolean(reportTarget)}
+          lang={lang}
+          targetName={reportTarget.name}
+          isAlreadyBlocked={Boolean(privateInfo.blockedUids?.includes(reportTarget.uid))}
+          onSubmitReport={async ({ reason, details, alsoBlock }) => {
+            await submitUserReport({
+              reporterUid: publicProfile.uid,
+              reportedUid: reportTarget.uid,
+              chatId: reportTarget.chatId,
+              reason: reason as ReportReason,
+              details,
+            });
+            if (alsoBlock) {
+              await handleToggleBlockUid(reportTarget.uid, true);
+            }
+          }}
+          onClose={() => setReportTarget(null)}
+        />
+      )}
 
       {/* Create 24h Status Modal */}
       <AnimatePresence>
@@ -3895,7 +4767,7 @@ export default function App() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.16 }}
             onClick={() => setLightboxImage(null)}
-            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-4 gap-4"
+            className="fixed inset-0 z-50 bg-black/85 flex flex-col items-center justify-center p-4 gap-4"
           >
             <div
               onClick={(e) => e.stopPropagation()}
@@ -3957,16 +4829,19 @@ export default function App() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.16 }}
             onClick={() => setMessageInfoTarget(null)}
-            className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4"
           >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              initial={{ opacity: 0, scale: 0.97, y: 18 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              exit={{ opacity: 0, scale: 0.97, y: 14 }}
+              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
               onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-sm bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-2xl space-y-4"
+              className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-3xl sm:rounded-2xl p-5 pt-3 sm:pt-5 shadow-2xl space-y-4 mobile-sheet-safe"
             >
+              <div className="sm:hidden flex justify-center pb-0.5">
+                <span className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+              </div>
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div className="w-9 h-9 rounded-xl bg-blue-600/12 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
@@ -4050,16 +4925,19 @@ export default function App() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.16 }}
             onClick={() => !offlineEmailPrompt.sending && setOfflineEmailPrompt(null)}
-            className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4"
           >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              initial={{ opacity: 0, scale: 0.97, y: 18 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 8 }}
-              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              exit={{ opacity: 0, scale: 0.97, y: 14 }}
+              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
               onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-sm bg-white dark:bg-slate-900 liquid-modal border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-2xl space-y-4"
+              className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-t-3xl sm:rounded-2xl p-5 pt-3 sm:pt-5 shadow-2xl space-y-4 mobile-sheet-safe"
             >
+              <div className="sm:hidden flex justify-center pb-0.5">
+                <span className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+              </div>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <div className="w-10 h-10 rounded-xl bg-blue-600/12 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
@@ -4163,44 +5041,57 @@ export default function App() {
                         )
                       }
                       placeholder={t(lang, 'recipientGmailPlaceholder')}
-                      className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      className="w-full min-h-[42px] px-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
                     />
                   </>
                 )}
               </div>
 
-              {offlineEmailPrompt.error && (
-                <div className="space-y-2">
-                  <p className="text-[11px] text-red-600 dark:text-red-400 font-medium leading-snug">
-                    {offlineEmailPrompt.error}
-                  </p>
-                  {/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(offlineEmailPrompt.toEmail.trim()) && (
-                    <a
-                      href={buildGmailWebComposeUrl({
-                        to: offlineEmailPrompt.toEmail.trim().toLowerCase(),
-                        senderName: publicProfile.displayName,
-                        messagePreview: offlineEmailPrompt.messagePreview,
-                        appUrl: `${getPublicAppOrigin()}/?chat=${encodeURIComponent(offlineEmailPrompt.chatId)}`,
-                        isBangla: lang === 'bn',
-                      })}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={() => setOfflineEmailPrompt(null)}
-                      className="w-full min-h-[38px] px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/60 text-blue-700 dark:text-blue-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      <span>{lang === 'bn' ? 'Gmail-এ সরাসরি পাঠান' : 'Open in Gmail'}</span>
-                    </a>
-                  )}
-                </div>
+              {officialMailerReady === true && !offlineEmailPrompt.error && (
+                <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                  ✓ {t(lang, 'officialMailerReadyNote')}
+                </p>
               )}
+
+              {offlineEmailPrompt.error && (
+                <p className="text-[11px] text-red-600 dark:text-red-400 font-medium leading-snug">
+                  {offlineEmailPrompt.error}
+                </p>
+              )}
+
+              {(offlineEmailPrompt.error || officialMailerReady === false) &&
+                /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(offlineEmailPrompt.toEmail.trim()) && (
+                  <a
+                    href={buildGmailWebComposeUrl({
+                      to: offlineEmailPrompt.toEmail.trim().toLowerCase(),
+                      senderName: publicProfile.displayName,
+                      messagePreview: offlineEmailPrompt.messagePreview,
+                      appUrl: `${getPublicAppOrigin()}/?chat=${encodeURIComponent(offlineEmailPrompt.chatId)}`,
+                      isBangla: lang === 'bn',
+                    })}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => {
+                      const cleanTo = offlineEmailPrompt.toEmail.trim().toLowerCase();
+                      setPeerEmailsByChat((prev) => ({
+                        ...prev,
+                        [offlineEmailPrompt.chatId]: cleanTo,
+                      }));
+                      setOfflineEmailPrompt(null);
+                    }}
+                    className="w-full min-h-[42px] px-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/60 text-blue-700 dark:text-blue-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>{t(lang, 'openGmailAppBtn')}</span>
+                  </a>
+                )}
 
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
                   disabled={offlineEmailPrompt.sending}
                   onClick={() => setOfflineEmailPrompt(null)}
-                  className="min-h-[40px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                  className="min-h-[42px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
                 >
                   {t(lang, 'dontAskOfflineChat')}
                 </button>
@@ -4242,7 +5133,7 @@ export default function App() {
                       );
                     }
                   }}
-                  className="flex-1 min-h-[40px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-45 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  className="flex-1 min-h-[42px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-45 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
                 >
                   {offlineEmailPrompt.sending ? (
                     <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -4292,6 +5183,17 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      {/* 4-Digit App PIN Lock Screen */}
+      {appLocked && isAppLockEnabled(publicProfile.uid) && (
+        <AppLockScreen
+          uid={publicProfile.uid}
+          displayName={publicProfile.displayName}
+          lang={lang}
+          onUnlocked={() => setAppLocked(false)}
+          onSignOut={handleSignOut}
+        />
+      )}
     </div>
     );
   }
@@ -4299,6 +5201,15 @@ export default function App() {
   return (
     <MotionConfig reducedMotion="user">
       {appBody}
+      <LegalPolicyModal
+        isOpen={legalModalState.open}
+        initialTab={legalModalState.tab}
+        lang={lang}
+        isAuthenticated={Boolean(firebaseUser && publicProfile)}
+        acceptedVersion={privateInfo?.acceptedPolicyVersion}
+        onAcceptPolicy={publicProfile ? handleAcceptPolicy : undefined}
+        onClose={() => setLegalModalState((prev) => ({ ...prev, open: false }))}
+      />
       <LaunchSplash
         visible={showLaunchSplash}
         onDismiss={() => setSplashDismissed(true)}
