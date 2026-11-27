@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 import { AnimatePresence, motion, MotionConfig } from 'motion/react';
 import {
   ArrowDown,
@@ -5654,6 +5655,7 @@ export default function App() {
         visible={showLaunchSplash}
         onDismiss={() => setSplashDismissed(true)}
       />
+      <SpeedInsights />
     </MotionConfig>
   );
 }
