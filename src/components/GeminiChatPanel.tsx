@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { ArrowLeft, RotateCcw, Send, Square, X, Zap } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowUp, RotateCcw, Send, Square, X, Zap } from 'lucide-react';
 import { useFloatingBadgeClearance } from '../lib/floatingBadge';
 import { t } from '../lib/i18n';
 import { playIncomingTone, playSentPop, unlockAudioNow } from '../lib/sound';
@@ -26,8 +26,8 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
       role: 'model',
       text:
         lang === 'bn'
-          ? `হ্যালো ${userName}! আমি KothaLink Gemini AI। এখন আগের চেয়ে অনেক দ্রুত রিয়েল-টাইমে উত্তর দেই — মেসেজ লেখা, বাংলা/ইংরেজি অনুবাদ বা যেকোনো প্রশ্ন করুন।`
-          : `Hi ${userName}! I'm KothaLink Gemini AI with real-time fast streaming. Ask me anything, translate Bangla/English/Banglish, or polish a message instantly.`,
+          ? `হ্যালো ${userName}! আমি LoopLy Gemini AI। এখন আগের চেয়ে অনেক দ্রুত রিয়েল-টাইমে উত্তর দেই — মেসেজ লেখা, বাংলা/ইংরেজি অনুবাদ বা যেকোনো প্রশ্ন করুন।`
+          : `Hi ${userName}! I'm LoopLy Gemini AI with real-time fast streaming. Ask me anything, translate Bangla/English/Banglish, or polish a message instantly.`,
       timestamp: Date.now(),
       model: 'gemini-3.1-flash-lite',
       reactions: {},
@@ -40,6 +40,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
   const [sendPulseKey, setSendPulseKey] = useState(0);
   const hasNetlifyBadge = useFloatingBadgeClearance();
 
+  const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -276,7 +277,7 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
         ];
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden">
+    <div className="flex-1 min-h-0 min-w-0 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden">
       {/* Header with Custom Animated Gemini Logo */}
       <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
@@ -354,8 +355,9 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
         </div>
       </div>
 
-      {/* Scrollable Thread */}
-      <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-4 bg-slate-50/50 dark:bg-slate-950">
+      {/* Scrollable Thread + Up/Down Arrow Controls */}
+      <div className="relative flex-1 flex flex-col overflow-hidden min-h-0">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-6 pr-14 sm:pr-16 py-5 space-y-4 bg-slate-50/50 dark:bg-slate-950">
         {turns.map((turn) => {
           const aggregated: AggregatedReaction[] = Object.entries(turn.reactions || {}).map(
             ([emoji, count]) => ({
@@ -429,6 +431,33 @@ export const GeminiChatPanel: React.FC<Props> = ({ lang, userName, onClose }) =>
         </AnimatePresence>
 
         <div ref={endRef} />
+      </div>
+      {turns.length > 0 && (
+        <div className="absolute bottom-3 right-3 z-20 flex flex-col gap-1.5">
+          <button
+            type="button"
+            onClick={() => scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}
+            aria-label={t(lang, 'scrollToTopLabel')}
+            title={t(lang, 'scrollToTopLabel')}
+            className="w-9 h-9 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400 shadow-md flex items-center justify-center transition-colors"
+          >
+            <ArrowUp className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const el = scrollRef.current;
+              if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+              endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            }}
+            aria-label={t(lang, 'scrollToBottomLabel')}
+            title={t(lang, 'scrollToBottomLabel')}
+            className="w-9 h-9 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400 shadow-md flex items-center justify-center transition-colors"
+          >
+            <ArrowDown className="w-4 h-4" />
+          </button>
+        </div>
+      )}
       </div>
 
       {/* Quick Prompt Chips when fresh */}

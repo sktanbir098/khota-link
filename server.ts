@@ -1,9 +1,11 @@
 import express from 'express';
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
+import { WebSocket, WebSocketServer } from 'ws';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 dotenv.config();
@@ -15,11 +17,11 @@ const ALLOWED_MODELS = new Set(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']);
 
 const ROLE_INSTRUCTIONS: Record<string, string> = {
   assistant:
-    'You are KothaLink Gemini AI — a super-fast, warm, and crisp bilingual companion fluent in English, Bangla (বাংলা), and Banglish. Reply directly, clearly, and concisely without unnecessary filler.',
+    'You are LoopLy Gemini AI — a super-fast, warm, and crisp bilingual companion fluent in English, Bangla (বাংলা), and Banglish. Reply directly, clearly, and concisely without unnecessary filler.',
   translator:
-    'You are KothaLink Translator & Reply Helper. Translate or polish messages naturally between English, Bangla (বাংলা), and Banglish immediately with natural, ready-to-send phrasing.',
+    'You are LoopLy Translator & Reply Helper. Translate or polish messages naturally between English, Bangla (বাংলা), and Banglish immediately with natural, ready-to-send phrasing.',
   tutor:
-    'You are KothaLink Study & Tech Tutor. Explain concepts clearly and quickly step-by-step with practical examples in English, Bangla, or Banglish matching the user’s language.',
+    'You are LoopLy Study & Tech Tutor. Explain concepts clearly and quickly step-by-step with practical examples in English, Bangla, or Banglish matching the user’s language.',
 };
 
 function getAiClient(): GoogleGenAI | null {
@@ -224,14 +226,14 @@ function sanitizeHttpUrl(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      return 'https://kothalink.app';
+      return 'https://looply.app';
     }
     if (parsed.username || parsed.password) {
-      return 'https://kothalink.app';
+      return 'https://looply.app';
     }
     return parsed.toString().slice(0, 400);
   } catch {
-    return 'https://kothalink.app';
+    return 'https://looply.app';
   }
 }
 
@@ -373,7 +375,7 @@ async function startServer() {
     const senderName =
       typeof body.senderName === 'string' && sanitizeSingleLine(body.senderName, 80)
         ? sanitizeSingleLine(body.senderName, 80)
-        : 'KothaLink User';
+        : 'LoopLy User';
     const preview =
       typeof body.messagePreview === 'string' && body.messagePreview.trim()
         ? body.messagePreview.trim().slice(0, 260)
@@ -384,22 +386,22 @@ async function startServer() {
     const safeChatUrl = sanitizeHttpUrl(rawChatUrl);
 
     const subject = body.isBangla
-      ? `KothaLink অ্যালার্ট: ${senderName} আপনাকে মেসেজ করেছেন`
-      : `KothaLink Alert: ${senderName} sent you a message`;
+      ? `LoopLy অ্যালার্ট: ${senderName} আপনাকে মেসেজ করেছেন`
+      : `LoopLy Alert: ${senderName} sent you a message`;
 
     const textContent = body.isBangla
-      ? `হ্যালো,\n\n${senderName} KothaLink-এ আপনাকে একটি মেসেজ করেছেন:\n"${preview}"\n\nচ্যাটে জয়েন ও রিপ্লাই দিন:\n${safeChatUrl}\n\n— KothaLink Official`
-      : `Hi,\n\n${senderName} sent you a message on KothaLink while you were offline:\n"${preview}"\n\nJoin Chat & Reply directly in KothaLink:\n${safeChatUrl}\n\n— KothaLink Official`;
+      ? `হ্যালো,\n\n${senderName} LoopLy-এ আপনাকে একটি মেসেজ করেছেন:\n"${preview}"\n\nচ্যাটে জয়েন ও রিপ্লাই দিন:\n${safeChatUrl}\n\n— LoopLy Official`
+      : `Hi,\n\n${senderName} sent you a message on LoopLy while you were offline:\n"${preview}"\n\nJoin Chat & Reply directly in LoopLy:\n${safeChatUrl}\n\n— LoopLy Official`;
 
     const safeSenderHtml = escapeHtml(senderName);
-    const senderInitial = escapeHtml((senderName.trim().charAt(0) || 'K').toUpperCase());
+    const senderInitial = escapeHtml((senderName.trim().charAt(0) || 'L').toUpperCase());
     const safePreviewHtml = escapeHtml(preview);
     const safeUrlHtml = escapeHtml(safeChatUrl);
     const htmlContent = `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#f1f5f9; padding:16px 12px; color:#0f172a;">
         <div style="max-width:480px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:20px; overflow:hidden; box-shadow:0 6px 24px rgba(15,23,42,0.06);">
-          <div style="background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%); padding:20px 22px; color:#ffffff;">
-            <div style="font-size:18px; font-weight:700; letter-spacing:-0.01em;">KothaLink</div>
+          <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%); padding:20px 22px; color:#ffffff;">
+            <div style="font-size:18px; font-weight:700; letter-spacing:-0.01em;">Loop<span style="color:#38bdf8;">Ly</span></div>
             <div style="font-size:12px; opacity:0.9; margin-top:3px;">${body.isBangla ? 'অফিশিয়াল মেসেজ অ্যালার্ট' : 'Official Message Alert'}</div>
           </div>
           <div style="padding:22px;">
@@ -427,7 +429,7 @@ async function startServer() {
               <a href="${safeUrlHtml}" style="color:#2563eb; text-decoration:underline;">${safeUrlHtml}</a>
             </p>
             <p style="margin:14px 0 0; font-size:11px; color:#64748b; text-align:center;">
-              ${body.isBangla ? 'এই মেসেজটি KothaLink অফিশিয়াল অ্যালার্ট সিস্টেম থেকে পাঠানো হয়েছে।' : 'Sent via KothaLink Official Alert System.'}
+              ${body.isBangla ? 'এই মেসেজটি LoopLy অফিশিয়াল অ্যালার্ট সিস্টেম থেকে পাঠানো হয়েছে।' : 'Sent via LoopLy Official Alert System.'}
             </p>
           </div>
         </div>
@@ -440,7 +442,7 @@ async function startServer() {
       if (smtpUser && smtpPass) {
         const smtpHost = process.env.SMTP_HOST?.trim() || 'smtp.gmail.com';
         const smtpPort = Number(process.env.SMTP_PORT) || 465;
-        const fromLabel = process.env.SMTP_FROM?.trim() || 'KothaLink Alerts';
+        const fromLabel = process.env.SMTP_FROM?.trim() || 'LoopLy Alerts';
         const transporter = nodemailer.createTransport({
           host: smtpHost,
           port: smtpPort,
@@ -461,7 +463,7 @@ async function startServer() {
 
       const resendKey = process.env.RESEND_API_KEY?.trim();
       if (resendKey) {
-        const fromAddr = process.env.SMTP_FROM?.trim() || 'KothaLink Alerts <onboarding@resend.dev>';
+        const fromAddr = process.env.SMTP_FROM?.trim() || 'LoopLy Alerts <onboarding@resend.dev>';
         const resendRes = await fetch('https://api.resend.com/emails', {
           method: 'POST',
           headers: {
@@ -616,13 +618,136 @@ async function startServer() {
     }
   });
 
+  const uiTranslationCache = new Map<string, Record<string, string>>();
+
+  app.post('/api/translate-ui', async (req, res) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const limitRes = checkRateLimit(`i18n:ip:${ip}`, 30, 10 * 60 * 1000);
+    if (!limitRes.allowed) {
+      res.setHeader('Retry-After', String(limitRes.retryAfterSec));
+      res.status(429).json({ error: 'Too many language requests. Please wait a moment.' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      targetLangCode?: string;
+      targetLangName?: string;
+      entries?: Record<string, string>;
+    };
+    const rawCode = typeof body.targetLangCode === 'string' ? body.targetLangCode.trim() : '';
+    if (!rawCode || rawCode.length < 2 || rawCode.length > 16 || !/^[a-zA-Z\-]+$/.test(rawCode)) {
+      res.status(400).json({ error: 'Invalid target language code.' });
+      return;
+    }
+    const langCode = rawCode.toLowerCase();
+    const cached = uiTranslationCache.get(langCode);
+    if (cached) {
+      res.json({ ok: true, code: langCode, translations: cached });
+      return;
+    }
+
+    const rawEntries =
+      body.entries && typeof body.entries === 'object' && !Array.isArray(body.entries)
+        ? body.entries
+        : {};
+    const keys = Object.keys(rawEntries).slice(0, 320);
+    if (keys.length === 0) {
+      res.status(400).json({ error: 'No translation entries provided.' });
+      return;
+    }
+
+    const ai = getAiClient();
+    if (!ai) {
+      res.status(503).json({ error: 'Translation service unavailable right now.' });
+      return;
+    }
+
+    const safeInput: Record<string, string> = {};
+    for (const k of keys) {
+      const val = rawEntries[k];
+      if (typeof val === 'string' && val.length <= 280) {
+        safeInput[k] = val;
+      }
+    }
+
+    const targetName =
+      typeof body.targetLangName === 'string' && body.targetLangName.trim()
+        ? sanitizeSingleLine(body.targetLangName, 60)
+        : langCode;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: `Translate the JSON values (keep every key identical) into natural, concise, everyday UI text for language "${targetName}" (${langCode}). Keep brand names "LoopLy", "Gmail", "Bluetooth", "QR", "Web Bluetooth", "JSON", and "PIN" untranslated or cleanly preserved. Return ONLY a valid JSON object mapping each key to its translated string.\n\n${JSON.stringify(safeInput)}`,
+        config: {
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+        },
+      });
+
+      const rawText = (response.text ?? '{}').trim();
+      const parsed = JSON.parse(rawText) as Record<string, unknown>;
+      const cleaned: Record<string, string> = {};
+      for (const k of Object.keys(safeInput)) {
+        const v = parsed[k];
+        if (typeof v === 'string' && v.trim()) {
+          cleaned[k] = v.trim();
+        }
+      }
+      if (Object.keys(cleaned).length > 0) {
+        uiTranslationCache.set(langCode, cleaned);
+      }
+      res.json({ ok: true, code: langCode, translations: cleaned });
+    } catch (err: unknown) {
+      const clean = extractGeminiError(err);
+      res.status(clean.status).json({ error: clean.message });
+    }
+  });
+
+  app.get('/api/rtc-config', (_req, res) => {
+    res.json({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        { urls: 'stun:openrelay.metered.ca:80' },
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:80?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+      ],
+    });
+  });
+
   const distDir = path.resolve(__dirname, 'dist');
   const isProd = process.env.NODE_ENV === 'production';
 
   if (isProd && fs.existsSync(distDir)) {
     app.use(express.static(distDir, { index: 'index.html' }));
     app.get('*', (req, res, next) => {
-      if (req.path.startsWith('/api/')) {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) {
         next();
         return;
       }
@@ -637,10 +762,128 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
+  // 100% Free Built-In WebSocket Live Voice Relay (/ws/call) for NAT/firewall fallback
+  const server = http.createServer(app);
+  const callRelayWss = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 });
+  const callRooms = new Map<string, Map<string, WebSocket>>();
+
+  const notifyRoomPeerCount = (room: Map<string, WebSocket>) => {
+    const payload = JSON.stringify({ type: 'peers', count: room.size });
+    for (const peerWs of room.values()) {
+      if (peerWs.readyState === WebSocket.OPEN) {
+        peerWs.send(payload);
+      }
+    }
+  };
+
+  server.on('upgrade', (request, socket, head) => {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(request.url || '/', 'http://localhost');
+    } catch {
+      socket.destroy();
+      return;
+    }
+    if (parsedUrl.pathname !== '/ws/call') {
+      socket.destroy();
+      return;
+    }
+
+    const callId = (parsedUrl.searchParams.get('callId') || '').trim();
+    const uid = (parsedUrl.searchParams.get('uid') || '').trim();
+    const idRe = /^[a-zA-Z0-9_-]{4,128}$/;
+    const uidRe = /^[a-zA-Z0-9_-]{1,128}$/;
+    if (!idRe.test(callId) || !uidRe.test(uid)) {
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const existingRoom = callRooms.get(callId);
+    if (existingRoom && !existingRoom.has(uid) && existingRoom.size >= 2) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    callRelayWss.handleUpgrade(request, socket, head, (ws) => {
+      let room = callRooms.get(callId);
+      if (!room) {
+        room = new Map<string, WebSocket>();
+        callRooms.set(callId, room);
+      }
+
+      const prevWs = room.get(uid);
+      if (prevWs && prevWs !== ws) {
+        try {
+          prevWs.close(1000, 'Replaced by newer connection');
+        } catch {
+          // Ignore
+        }
+      }
+      room.set(uid, ws);
+      notifyRoomPeerCount(room);
+
+      let isAlive = true;
+      let windowStart = Date.now();
+      let frameCount = 0;
+
+      ws.on('pong', () => {
+        isAlive = true;
+      });
+
+      const heartbeat = setInterval(() => {
+        if (!isAlive) {
+          ws.terminate();
+          return;
+        }
+        isAlive = false;
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        }
+      }, 25_000);
+
+      ws.on('message', (data, isBinary) => {
+        const now = Date.now();
+        if (now - windowStart >= 1000) {
+          windowStart = now;
+          frameCount = 0;
+        }
+        frameCount += 1;
+        if (frameCount > 180) return;
+
+        const currentRoom = callRooms.get(callId);
+        if (!currentRoom) return;
+        for (const [peerUid, peerWs] of currentRoom.entries()) {
+          if (peerUid !== uid && peerWs.readyState === WebSocket.OPEN) {
+            peerWs.send(data, { binary: isBinary });
+          }
+        }
+      });
+
+      const cleanupPeer = () => {
+        clearInterval(heartbeat);
+        const currentRoom = callRooms.get(callId);
+        if (!currentRoom) return;
+        if (currentRoom.get(uid) === ws) {
+          currentRoom.delete(uid);
+          if (currentRoom.size === 0) {
+            callRooms.delete(callId);
+          } else {
+            notifyRoomPeerCount(currentRoom);
+          }
+        }
+      };
+
+      ws.on('close', cleanupPeer);
+      ws.on('error', cleanupPeer);
+    });
+  });
+
   const PORT = resolveServerPort(isProd);
   const HOST = readCliArg('--host') || '0.0.0.0';
-  app.listen(PORT, HOST, () => {
-    console.log(`KothaLink server listening on http://${HOST}:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`LoopLy server listening on http://${HOST}:${PORT}`);
   });
 }
 

@@ -6,7 +6,7 @@ export const LIMITS = {
   ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
   DISPLAY_NAME_MAX: 80,
   BIO_MAX: 160,
-  PHOTO_URL_MAX: 500,
+  PHOTO_URL_MAX: 32000,
   EMAIL_MAX: 120,
   PHONE_MAX: 24,
   PHONE_PATTERN: /^(\+[0-9]{6,15})?$/,
@@ -70,7 +70,30 @@ export interface CallCandidate {
 export type ChatChannel = 'gmail' | 'phone' | 'nearby';
 export type MessageTransport = 'gmail' | 'phone' | 'internet' | 'nearby' | 'bluetooth';
 export type AttachmentType = 'none' | 'image' | 'file';
-export type AppLanguage = 'en' | 'bn';
+
+export const WORLD_LANGUAGES = [
+  { code: 'en', nativeName: 'English', englishName: 'English', rtl: false },
+  { code: 'bn', nativeName: 'বাংলা', englishName: 'Bengali', rtl: false },
+  { code: 'hi', nativeName: 'हिन्दी', englishName: 'Hindi', rtl: false },
+  { code: 'ar', nativeName: 'العربية', englishName: 'Arabic', rtl: true },
+  { code: 'es', nativeName: 'Español', englishName: 'Spanish', rtl: false },
+  { code: 'fr', nativeName: 'Français', englishName: 'French', rtl: false },
+  { code: 'de', nativeName: 'Deutsch', englishName: 'German', rtl: false },
+  { code: 'pt', nativeName: 'Português', englishName: 'Portuguese', rtl: false },
+  { code: 'zh', nativeName: '中文', englishName: 'Chinese', rtl: false },
+  { code: 'ja', nativeName: '日本語', englishName: 'Japanese', rtl: false },
+  { code: 'ko', nativeName: '한국어', englishName: 'Korean', rtl: false },
+  { code: 'ru', nativeName: 'Русский', englishName: 'Russian', rtl: false },
+  { code: 'tr', nativeName: 'Türkçe', englishName: 'Turkish', rtl: false },
+  { code: 'id', nativeName: 'Bahasa Indonesia', englishName: 'Indonesian', rtl: false },
+  { code: 'ur', nativeName: 'اردو', englishName: 'Urdu', rtl: true },
+  { code: 'it', nativeName: 'Italiano', englishName: 'Italian', rtl: false },
+  { code: 'th', nativeName: 'ไทย', englishName: 'Thai', rtl: false },
+  { code: 'vi', nativeName: 'Tiếng Việt', englishName: 'Vietnamese', rtl: false },
+] as const;
+
+export type AppLanguage = (typeof WORLD_LANGUAGES)[number]['code'];
+export type OnlineVisibility = 'everyone' | 'contacts' | 'nobody';
 export type AppTheme = 'dark' | 'light';
 export type StatusBgGradient = 'blue' | 'emerald' | 'amber' | 'rose' | 'slate';
 
@@ -124,8 +147,10 @@ export interface UserPublicProfile {
   photoUrl: string;
   bio: string;
   maskedEmail?: string;
+  showGmail?: boolean;
   hasPhone: boolean;
   showOnlineStatus?: boolean;
+  onlineVisibility?: OnlineVisibility;
   searchable?: boolean;
   onlineStatus: 'online' | 'away' | 'offline';
   lastSeenAt: Timestamp | null;
@@ -183,9 +208,11 @@ export interface UserSearchResult {
   photoUrl: string;
   bio: string;
   maskedEmail: string;
+  showGmail?: boolean;
   onlineStatus?: 'online' | 'away' | 'offline';
   lastSeenAt?: Timestamp | null;
   showOnlineStatus?: boolean;
+  onlineVisibility?: OnlineVisibility;
   score: number;
 }
 

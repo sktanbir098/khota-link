@@ -24,6 +24,18 @@ const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
 };
 
@@ -207,7 +219,7 @@ export async function createNearbyHostSession(params: {
 }): Promise<NearbyP2PSession> {
   const roomCode = generate6DigitCode();
   const pc = new RTCPeerConnection(RTC_CONFIG);
-  const dataChannel = pc.createDataChannel('kothalink-direct', { ordered: true });
+  const dataChannel = pc.createDataChannel('looply-direct', { ordered: true });
 
   let isP2POpen = false;
   let unsubRoom: Unsubscribe | null = null;
@@ -669,6 +681,321 @@ export async function joinNearbyGuestSession(params: {
     sendMessage,
     sendAttachment,
     closeSession,
+    cleanup,
+  };
+}
+
+// ============================================================================
+// ZERO-INTERNET OFFLINE CODE / QR WEBRTC P2P (Local Wi-Fi / Hotspot / LAN)
+// ============================================================================
+
+const OFFLINE_RTC_CONFIG: RTCConfiguration = {
+  iceServers: [],
+};
+
+export interface OfflineP2PSession extends NearbyP2PSession {
+  isOfflineDirect: true;
+  offerCode?: string;
+  answerCode?: string;
+  acceptAnswerCode?: (answerCode: string) => Promise<void>;
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlToBytes(b64: string): Uint8Array {
+  const padded = b64.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((b64.length + 3) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function encodeOfflineSignal(prefix: 'KL1' | 'KL2', payload: { s: string; n: string }): Promise<string> {
+  const rawBytes = new TextEncoder().encode(JSON.stringify(payload));
+  if (typeof CompressionStream !== 'undefined') {
+    try {
+      const cs = new CompressionStream('deflate-raw');
+      const writer = cs.writable.getWriter();
+      await writer.write(rawBytes);
+      await writer.close();
+      const compressed = new Uint8Array(await new Response(cs.readable).arrayBuffer());
+      return `${prefix}:${bytesToBase64Url(compressed)}`;
+    } catch {
+      // Fallback below
+    }
+  }
+  return `${prefix}R:${bytesToBase64Url(rawBytes)}`;
+}
+
+async function decodeOfflineSignal(rawInput: string): Promise<{ kind: 'offer' | 'answer'; sdp: string; name: string }> {
+  let clean = rawInput.trim();
+  // Support scanning full LoopLy QR URL (?offline=KL1:...)
+  if (clean.startsWith('http://') || clean.startsWith('https://')) {
+    try {
+      const url = new URL(clean);
+      const param = url.searchParams.get('offline');
+      if (param) clean = param.trim();
+    } catch {
+      // Ignore URL parse error
+    }
+  }
+
+  const isCompressed = clean.startsWith('KL1:') || clean.startsWith('KL2:');
+  const isRaw = clean.startsWith('KL1R:') || clean.startsWith('KL2R:');
+  if (!isCompressed && !isRaw) {
+    throw new Error('Invalid offline pairing code. Please paste the full KL1 / KL2 code or scan the QR.');
+  }
+  const kind: 'offer' | 'answer' = clean.startsWith('KL1') ? 'offer' : 'answer';
+  const body = clean.slice(clean.indexOf(':') + 1);
+  const bytes = base64UrlToBytes(body);
+
+  let jsonText: string;
+  if (isCompressed) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('This browser cannot decompress offline pairing codes.');
+    }
+    const ds = new DecompressionStream('deflate-raw');
+    const writer = ds.writable.getWriter();
+    await writer.write(new Uint8Array(bytes));
+    await writer.close();
+    const decompressed = await new Response(ds.readable).arrayBuffer();
+    jsonText = new TextDecoder().decode(decompressed);
+  } else {
+    jsonText = new TextDecoder().decode(bytes);
+  }
+
+  const parsed = JSON.parse(jsonText) as { s?: string; n?: string };
+  if (!parsed?.s) {
+    throw new Error('Offline pairing code is incomplete or corrupted.');
+  }
+  return {
+    kind,
+    sdp: parsed.s,
+    name: sanitizeStr(parsed.n || 'Offline Peer', LIMITS.DISPLAY_NAME_MAX) || 'Offline Peer',
+  };
+}
+
+function waitForLocalIceGathering(pc: RTCPeerConnection, timeoutMs = 950): Promise<void> {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      pc.removeEventListener('icegatheringstatechange', onState);
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const onState = () => {
+      if (pc.iceGatheringState === 'complete') done();
+    };
+    const timer = window.setTimeout(done, timeoutMs);
+    pc.addEventListener('icegatheringstatechange', onState);
+  });
+}
+
+export async function createOfflineHostOffer(params: {
+  displayName: string;
+  onStatusChange: (status: 'waiting' | 'paired' | 'p2p-open' | 'closed', peerName?: string) => void;
+  onIncomingMessage: (msg: LocalDirectMessage) => void;
+}): Promise<OfflineP2PSession> {
+  const roomCode = generate6DigitCode();
+  const safeName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'Offline Host';
+  const pc = new RTCPeerConnection(OFFLINE_RTC_CONFIG);
+  const dataChannel = pc.createDataChannel('looply-offline', { ordered: true });
+  const seenMsgIds = new Set<string>();
+  const handleChannelMsg = createChannelMessageHandler(seenMsgIds, params.onIncomingMessage);
+
+  let isOpen = false;
+  let remotePeerName = 'Offline Peer';
+
+  dataChannel.onopen = () => {
+    isOpen = true;
+    params.onStatusChange('p2p-open', remotePeerName);
+  };
+  dataChannel.onclose = () => {
+    isOpen = false;
+    params.onStatusChange('closed', remotePeerName);
+  };
+  dataChannel.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      handleChannelMsg(ev.data);
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitForLocalIceGathering(pc, 950);
+
+  const gatheredSdp = pc.localDescription?.sdp || offer.sdp || '';
+  const offerCode = await encodeOfflineSignal('KL1', { s: gatheredSdp, n: safeName });
+  params.onStatusChange('waiting');
+
+  const acceptAnswerCode = async (answerCodeRaw: string): Promise<void> => {
+    const decoded = await decodeOfflineSignal(answerCodeRaw);
+    if (decoded.kind !== 'answer') {
+      throw new Error('Please paste your friend’s Reply Code (starts with KL2:).');
+    }
+    remotePeerName = decoded.name;
+    await pc.setRemoteDescription(
+      new RTCSessionDescription({ type: 'answer', sdp: decoded.sdp })
+    );
+    params.onStatusChange(isOpen ? 'p2p-open' : 'paired', remotePeerName);
+  };
+
+  const sendMessage = async (text: string): Promise<'webrtc' | 'nearby'> => {
+    const clean = sanitizeStr(text, LIMITS.MESSAGE_TEXT_MAX);
+    if (!clean) return 'webrtc';
+    if (!isOpen || dataChannel.readyState !== 'open') {
+      throw new Error('Wait until the offline P2P connection opens after entering your friend’s reply code.');
+    }
+    dataChannel.send(
+      JSON.stringify({
+        type: 'text',
+        id: `off_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        senderName: safeName,
+        text: clean,
+        timestamp: Date.now(),
+      })
+    );
+    return 'webrtc';
+  };
+
+  const sendAttachment = async (att: PreparedAttachment, caption = ''): Promise<void> => {
+    if (!isOpen || dataChannel.readyState !== 'open') {
+      throw new Error('Open Offline P2P channel first to send photos or files.');
+    }
+    await sendFileOverChannel(dataChannel, safeName, att, caption);
+  };
+
+  const cleanup = () => {
+    try {
+      dataChannel.close();
+    } catch {
+      // Ignore
+    }
+    try {
+      pc.close();
+    } catch {
+      // Ignore
+    }
+  };
+
+  return {
+    roomCode,
+    role: 'host',
+    peerConnection: pc,
+    isOfflineDirect: true,
+    offerCode,
+    acceptAnswerCode,
+    sendMessage,
+    sendAttachment,
+    closeSession: async () => cleanup(),
+    cleanup,
+  };
+}
+
+export async function acceptOfflineOfferAndCreateAnswer(params: {
+  offerCode: string;
+  displayName: string;
+  onStatusChange: (status: 'waiting' | 'paired' | 'p2p-open' | 'closed', peerName?: string) => void;
+  onIncomingMessage: (msg: LocalDirectMessage) => void;
+}): Promise<OfflineP2PSession> {
+  const decoded = await decodeOfflineSignal(params.offerCode);
+  if (decoded.kind !== 'offer') {
+    throw new Error('Please paste the Host’s Offline Code (starts with KL1:).');
+  }
+
+  const roomCode = generate6DigitCode();
+  const safeName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'Offline Guest';
+  const pc = new RTCPeerConnection(OFFLINE_RTC_CONFIG);
+  const seenMsgIds = new Set<string>();
+  const handleChannelMsg = createChannelMessageHandler(seenMsgIds, params.onIncomingMessage);
+
+  let activeChannel: RTCDataChannel | null = null;
+  let isOpen = false;
+
+  pc.ondatachannel = (event) => {
+    activeChannel = event.channel;
+    activeChannel.onopen = () => {
+      isOpen = true;
+      params.onStatusChange('p2p-open', decoded.name);
+    };
+    activeChannel.onclose = () => {
+      isOpen = false;
+      params.onStatusChange('closed', decoded.name);
+    };
+    activeChannel.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        handleChannelMsg(ev.data);
+      }
+    };
+  };
+
+  await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: decoded.sdp }));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await waitForLocalIceGathering(pc, 950);
+
+  const gatheredSdp = pc.localDescription?.sdp || answer.sdp || '';
+  const answerCode = await encodeOfflineSignal('KL2', { s: gatheredSdp, n: safeName });
+  params.onStatusChange('paired', decoded.name);
+
+  const sendMessage = async (text: string): Promise<'webrtc' | 'nearby'> => {
+    const clean = sanitizeStr(text, LIMITS.MESSAGE_TEXT_MAX);
+    if (!clean) return 'webrtc';
+    if (!isOpen || !activeChannel || activeChannel.readyState !== 'open') {
+      throw new Error('Send your Reply Code to the host first so the direct offline channel opens.');
+    }
+    activeChannel.send(
+      JSON.stringify({
+        type: 'text',
+        id: `off_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        senderName: safeName,
+        text: clean,
+        timestamp: Date.now(),
+      })
+    );
+    return 'webrtc';
+  };
+
+  const sendAttachment = async (att: PreparedAttachment, caption = ''): Promise<void> => {
+    if (!isOpen || !activeChannel || activeChannel.readyState !== 'open') {
+      throw new Error('Wait until Host pastes your Reply Code to send photos or files.');
+    }
+    await sendFileOverChannel(activeChannel, safeName, att, caption);
+  };
+
+  const cleanup = () => {
+    try {
+      activeChannel?.close();
+    } catch {
+      // Ignore
+    }
+    try {
+      pc.close();
+    } catch {
+      // Ignore
+    }
+  };
+
+  return {
+    roomCode,
+    role: 'guest',
+    peerConnection: pc,
+    isOfflineDirect: true,
+    answerCode,
+    sendMessage,
+    sendAttachment,
+    closeSession: async () => cleanup(),
     cleanup,
   };
 }

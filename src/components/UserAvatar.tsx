@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 
 export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
@@ -66,6 +66,11 @@ export const UserAvatar: React.FC<Props> = ({
   ringColorClass = 'ring-white dark:ring-slate-950',
 }) => {
   const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    setImgError(false);
+  }, [photoUrl]);
+
   const sz = SIZE_MAP[size];
   const initial = (name || 'U').trim().slice(0, 1).toUpperCase();
   const showImage = Boolean(photoUrl && !imgError);

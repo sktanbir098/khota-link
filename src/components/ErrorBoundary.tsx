@@ -50,7 +50,7 @@ export class ErrorBoundary extends React.Component<
               className="w-full min-h-[44px] flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors"
             >
               <RotateCcw className="w-4 h-4" />
-              Reload KothaLink
+              Reload LoopLy
             </button>
           </div>
         </div>

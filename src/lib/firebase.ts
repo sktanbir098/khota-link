@@ -1,6 +1,14 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore, initializeFirestore } from 'firebase/firestore';
+import {
+  doc,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  persistentSingleTabManager,
+} from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
@@ -12,11 +20,25 @@ function createFirestoreInstance() {
   try {
     return initializeFirestore(
       app,
-      { experimentalAutoDetectLongPolling: true },
+      {
+        localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+        experimentalAutoDetectLongPolling: true,
+      },
       firestoreDatabaseId
     );
   } catch {
-    return getFirestore(app, firestoreDatabaseId);
+    try {
+      return initializeFirestore(
+        app,
+        {
+          localCache: persistentLocalCache({ tabManager: persistentSingleTabManager({}) }),
+          experimentalAutoDetectLongPolling: true,
+        },
+        firestoreDatabaseId
+      );
+    } catch {
+      return getFirestore(app, firestoreDatabaseId);
+    }
   }
 }
 
@@ -27,16 +49,19 @@ export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export async function testConnection(): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration: the client is offline.');
+      console.warn('Firestore operating in offline cache mode.');
     }
   }
 }
 
-testConnection();
+void testConnection();
 
 export enum OperationType {
   CREATE = 'create',
@@ -159,9 +184,13 @@ export function resolvePeerMaskedHint(params: {
   channel?: string;
   peerMaskedEmail?: string;
   peerEmail?: string;
+  peerShowGmail?: boolean;
   viewerEmail?: string;
-  lang?: 'en' | 'bn';
+  lang?: string;
 }): string {
+  if (params.peerShowGmail === false) {
+    return params.lang === 'bn' ? 'Gmail গোপন রাখা হয়েছে' : 'Gmail hidden by user';
+  }
   const cleanPeerEmail = (params.peerEmail || '').trim().toLowerCase();
   if (cleanPeerEmail && cleanPeerEmail.includes('@')) {
     return maskEmail(cleanPeerEmail);
@@ -290,8 +319,8 @@ export function buildGmailAlertContent(params: {
   isBangla?: boolean;
 }): { subject: string; body: string } {
   const subject = params.isBangla
-    ? `KothaLink: ${params.senderName} আপনাকে মেসেজ করেছেন`
-    : `KothaLink: ${params.senderName} sent you a message`;
+    ? `LoopLy: ${params.senderName} আপনাকে মেসেজ করেছেন`
+    : `LoopLy: ${params.senderName} sent you a message`;
 
   const snippet = params.messagePreview.trim()
     ? params.messagePreview.trim().slice(0, 220)
@@ -303,26 +332,26 @@ export function buildGmailAlertContent(params: {
     ? [
         `হ্যালো,`,
         ``,
-        `${params.senderName} KothaLink অ্যাপে আপনাকে একটি মেসেজ করেছেন (আপনি অফলাইনে থাকায় এই অ্যালার্ট পাঠানো হয়েছে):`,
+        `${params.senderName} LoopLy অ্যাপে আপনাকে একটি মেসেজ করেছেন (আপনি অফলাইনে থাকায় এই অ্যালার্ট পাঠানো হয়েছে):`,
         ``,
         `"${snippet}"`,
         ``,
-        `চ্যাটে জয়েন করতে ও রিপ্লাই দিতে নিচের অফিশিয়াল KothaLink লিংকে ক্লিক করুন:`,
+        `চ্যাটে জয়েন করতে ও রিপ্লাই দিতে নিচের অফিশিয়াল LoopLy লিংকে ক্লিক করুন:`,
         params.appUrl,
         ``,
-        `— KothaLink Official`,
+        `— LoopLy Official`,
       ]
     : [
         `Hi there,`,
         ``,
-        `${params.senderName} sent you a message on KothaLink while you were offline:`,
+        `${params.senderName} sent you a message on LoopLy while you were offline:`,
         ``,
         `"${snippet}"`,
         ``,
-        `Join Chat & Reply directly in KothaLink:`,
+        `Join Chat & Reply directly in LoopLy:`,
         params.appUrl,
         ``,
-        `— KothaLink Official`,
+        `— LoopLy Official`,
       ];
 
   return { subject, body: bodyLines.join('\r\n') };

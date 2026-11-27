@@ -272,7 +272,7 @@ export const ConnectModal: React.FC<Props> = ({
           </button>
         </div>
 
-        <div className="p-5 sm:p-6 space-y-5 overflow-y-auto">
+        <div className="flex-1 min-h-0 p-4 sm:p-6 space-y-5 overflow-y-auto">
           {/* Segmented Method Tabs: Find People, Gmail & Invite Code */}
           <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
             <button
@@ -465,8 +465,8 @@ export const ConnectModal: React.FC<Props> = ({
                   />
                   <p className="text-xs text-slate-500 dark:text-slate-400">
                     {lang === 'bn'
-                      ? 'তারা KothaLink-এ থাকলে সাথে সাথে চ্যাট শুরু হবে। না থাকলে, তারা এই Gmail দিয়ে সাইন ইন করার সাথে সাথেই আপনার সব মেসেজ দেখতে পাবে!'
-                      : 'If they already use KothaLink, chat opens immediately. Otherwise, any messages you send here automatically appear in their account as soon as they sign in with this Gmail.'}
+                      ? 'তারা LoopLy-এ থাকলে সাথে সাথে চ্যাট শুরু হবে। না থাকলে, তারা এই Gmail দিয়ে সাইন ইন করার সাথে সাথেই আপনার সব মেসেজ দেখতে পাবে!'
+                      : 'If they already use LoopLy, chat opens immediately. Otherwise, any messages you send here automatically appear in their account as soon as they sign in with this Gmail.'}
                   </p>
                 </div>
               ) : (

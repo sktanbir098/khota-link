@@ -99,6 +99,7 @@ interface ViewProps {
   mode: 'view';
   lang: AppLanguage;
   currentUser: UserPublicProfile;
+  peerProfiles?: Record<string, UserPublicProfile>;
   statuses: UserStatus[];
   initialIndex?: number;
   authorOnline?: boolean;
@@ -371,29 +372,43 @@ export const StatusModal: React.FC<Props> = (props) => {
                 >
                   <ArrowLeft className="w-4 h-4" />
                 </button>
-                <UserAvatar
-                  name={status.displayName}
-                  photoUrl={status.photoUrl}
-                  size="sm"
-                  isOnline={props.authorOnline}
-                  ringColorClass="ring-black/70"
-                />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-semibold text-white truncate">{status.displayName}</span>
-                    {isPaused && (
-                      <Pause className="w-3 h-3 text-white/75 shrink-0" aria-label="Paused" />
-                    )}
-                  </div>
-                  <div className="text-[11px] text-white/80 font-mono-tabular flex items-center gap-1.5">
-                    <span>{formatRelativeTime(status.createdAt)}</span>
-                    <span aria-hidden="true">·</span>
-                    <span className="inline-flex items-center gap-0.5 text-emerald-300">
-                      <Clock className="w-2.5 h-2.5" />
-                      {formatRemaining24h(status.createdAt, status.expiresAt, props.lang)}
-                    </span>
-                  </div>
-                </div>
+                {(() => {
+                  const liveAuthor =
+                    status.uid === props.currentUser.uid
+                      ? props.currentUser
+                      : props.peerProfiles?.[status.uid];
+                  const resolvedAuthorName = liveAuthor?.displayName || status.displayName;
+                  const resolvedAuthorPhoto = liveAuthor ? liveAuthor.photoUrl : status.photoUrl;
+                  return (
+                    <>
+                      <UserAvatar
+                        name={resolvedAuthorName}
+                        photoUrl={resolvedAuthorPhoto}
+                        size="sm"
+                        isOnline={props.authorOnline}
+                        ringColorClass="ring-black/70"
+                      />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-semibold text-white truncate">
+                            {resolvedAuthorName}
+                          </span>
+                          {isPaused && (
+                            <Pause className="w-3 h-3 text-white/75 shrink-0" aria-label="Paused" />
+                          )}
+                        </div>
+                        <div className="text-[11px] text-white/80 font-mono-tabular flex items-center gap-1.5">
+                          <span>{formatRelativeTime(status.createdAt)}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="inline-flex items-center gap-0.5 text-emerald-300">
+                            <Clock className="w-2.5 h-2.5" />
+                            {formatRemaining24h(status.createdAt, status.expiresAt, props.lang)}
+                          </span>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
               <div className="flex items-center gap-1.5 shrink-0">

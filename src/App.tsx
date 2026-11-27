@@ -1,22 +1,23 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import { AnimatePresence, motion, MotionConfig } from 'motion/react';
 import {
   ArrowDown,
   ArrowLeft,
+  ArrowUp,
   Ban,
   Bell,
   BellOff,
   BellRing,
   Bluetooth,
+  Camera,
   Check,
-  ChevronDown,
-  ChevronUp,
   Copy,
   Download,
   ExternalLink,
   FileText,
   Film,
+  Globe,
   ImagePlus,
   Info,
   KeyRound,
@@ -52,19 +53,24 @@ import {
 import { AppLockScreen } from './components/AppLockScreen';
 import { BluetoothNearbyPanel } from './components/BluetoothNearbyPanel';
 import { ActiveCallSession, CallOverlay } from './components/CallOverlay';
+import { CameraCaptureModal } from './components/CameraCaptureModal';
 import { ConnectModal } from './components/ConnectModal';
 import { GeminiChatPanel } from './components/GeminiChatPanel';
 import { GeminiLogo } from './components/GeminiLogo';
-import { KothaLinkLogo, LaunchSplash } from './components/KothaLinkLogo';
+import { LoopLyLogo, LaunchSplash } from './components/LoopLyLogo';
 import { LegalPolicyModal, PolicyTab } from './components/LegalPolicyModal';
 import { AggregatedReaction, MessageBubble } from './components/MessageBubble';
 import { PeerProfileModal } from './components/PeerProfileModal';
+import { OfflineIndicator, PWAInstallButton } from './components/PWAInstallButton';
 import { ProfileModal } from './components/ProfileModal';
 import { ReportUserModal } from './components/ReportUserModal';
+import { SandDissolveHandle, SandDissolveOverlay } from './components/SandDissolveOverlay';
 import { STATUS_GRADIENTS, StatusModal } from './components/StatusModal';
 import { UserAvatar } from './components/UserAvatar';
+import { useOnlineStatus } from './hooks/usePWA';
 import { getAppLockConfig, isAppLockEnabled } from './lib/appLock';
 import { formatFileSize, prepareAttachment, triggerFileDownload } from './lib/attachments';
+import { decryptVaultJson, encryptVaultJson } from './lib/cryptoVault';
 import {
   acceptPolicyVersion,
   claimPendingEmailChats,
@@ -90,6 +96,8 @@ import {
   subscribeChatMessages,
   subscribeChatParticipantEmails,
   subscribeChatReactions,
+  subscribeOwnPrivateInfo,
+  subscribeOwnUserProfile,
   subscribeStatusesForUids,
   subscribeTypingStatus,
   subscribeUserChats,
@@ -112,7 +120,7 @@ import {
   sendGmailAlertEmail,
 } from './lib/firebase';
 import { useFloatingBadgeClearance } from './lib/floatingBadge';
-import { t } from './lib/i18n';
+import { isRtlLanguage, normalizeAppLanguage, t } from './lib/i18n';
 import { buildInviteShareUrl, getPublicAppOrigin } from './lib/shareLink';
 import {
   getNotificationPermission,
@@ -126,7 +134,7 @@ import {
   showBackgroundNotification,
   unlockAudioNow,
 } from './lib/sound';
-import { generateCallId, subscribeIncomingCalls } from './lib/callService';
+import { generateCallId, subscribeIncomingCalls, warmRtcConfig } from './lib/callService';
 import {
   AppLanguage,
   AppTheme,
@@ -144,13 +152,33 @@ import {
   UserPublicProfile,
   UserSearchResult,
   UserStatus,
+  WORLD_LANGUAGES,
 } from './types/chat';
 
 const QUICK_EMOJIS = ['👋', '😊', '👍', '❤️', '😂', '🙏', '🔥', '✨'];
 const ONLINE_STALE_MS = 75_000;
 
-function isPeerOnline(peer: UserPublicProfile | undefined, nowMs: number): boolean {
-  if (!peer || peer.showOnlineStatus === false || peer.onlineStatus !== 'online') return false;
+function canSeePeerPresence(
+  peer: { showOnlineStatus?: boolean; onlineVisibility?: string } | undefined,
+  hasSharedChat = true
+): boolean {
+  if (!peer || peer.showOnlineStatus === false || peer.onlineVisibility === 'nobody') {
+    return false;
+  }
+  if (peer.onlineVisibility === 'contacts' && !hasSharedChat) {
+    return false;
+  }
+  return true;
+}
+
+function isPeerOnline(
+  peer: UserPublicProfile | undefined,
+  nowMs: number,
+  hasSharedChat = true
+): boolean {
+  if (!canSeePeerPresence(peer, hasSharedChat) || !peer || peer.onlineStatus !== 'online') {
+    return false;
+  }
   const lastSeenMs = peer.lastSeenAt?.toMillis?.();
   if (!lastSeenMs) return false;
   return nowMs - lastSeenMs < ONLINE_STALE_MS;
@@ -159,12 +187,13 @@ function isPeerOnline(peer: UserPublicProfile | undefined, nowMs: number): boole
 function formatPresenceLabel(
   peer: UserPublicProfile | undefined,
   lang: AppLanguage,
-  nowMs: number
+  nowMs: number,
+  hasSharedChat = true
 ): string {
-  if (peer?.showOnlineStatus === false) {
-    return t(lang, 'offline');
+  if (!canSeePeerPresence(peer, hasSharedChat)) {
+    return t(lang, 'presenceHidden');
   }
-  if (isPeerOnline(peer, nowMs)) {
+  if (isPeerOnline(peer, nowMs, hasSharedChat)) {
     return t(lang, 'online');
   }
   const lastSeenMs = peer?.lastSeenAt?.toMillis?.();
@@ -246,7 +275,7 @@ export default function App() {
   });
   const [lang, setLang] = useState<AppLanguage>(() => {
     if (typeof window === 'undefined') return 'en';
-    return localStorage.getItem('kl_lang') === 'bn' ? 'bn' : 'en';
+    return normalizeAppLanguage(localStorage.getItem('kl_lang'));
   });
   const [soundOn, setSoundOn] = useState<boolean>(() => isSoundEnabled());
   const [enterToSend, setEnterToSend] = useState<boolean>(() => {
@@ -263,7 +292,13 @@ export default function App() {
   const [privateInfo, setPrivateInfo] = useState<UserPrivateInfo | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [agreeTerms, setAgreeTerms] = useState(false);
+  const [agreePrivacy, setAgreePrivacy] = useState(false);
+  const [agreeSecurity, setAgreeSecurity] = useState(false);
+  const [consentFlash, setConsentFlash] = useState(false);
+  const isOnline = useOnlineStatus();
   const hasNetlifyBadge = useFloatingBadgeClearance();
+  const sandDissolveRef = useRef<SandDissolveHandle | null>(null);
 
   // Chats, presence, messages, reactions, typing & attachments
   const [chats, setChats] = useState<ChatRoom[]>([]);
@@ -288,6 +323,8 @@ export default function App() {
   const [justArrivedIds, setJustArrivedIds] = useState<Set<string>>(() => new Set());
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [photoMenuOpen, setPhotoMenuOpen] = useState(false);
+  const [chatCameraOpen, setChatCameraOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<PreparedAttachment | null>(null);
   const [preparingAttachment, setPreparingAttachment] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -308,30 +345,11 @@ export default function App() {
   // Navigation & filters
   const [filterTab, setFilterTab] = useState<'all' | 'gmail' | 'nearby'>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [chatSearchQuery, setChatSearchQuery] = useState('');
-  const [chatSearchFilterOnly, setChatSearchFilterOnly] = useState(true);
-  const [chatSearchMatchIdx, setChatSearchMatchIdx] = useState(0);
-  const chatSearchInputRef = useRef<HTMLInputElement>(null);
   const [workspaceView, setWorkspaceView] = useState<'hub' | 'chat' | 'bluetooth' | 'gemini'>('hub');
   const [officialMailerReady, setOfficialMailerReady] = useState<boolean | null>(null);
-  const [pendingEmailsByChat, setPendingEmailsByChat] = useState<Record<string, string>>(() => {
-    if (typeof window === 'undefined') return {};
-    try {
-      const parsed = JSON.parse(localStorage.getItem('kl_pending_emails') || '{}');
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
-    }
-  });
-  const [peerEmailsByChat, setPeerEmailsByChat] = useState<Record<string, string>>(() => {
-    if (typeof window === 'undefined') return {};
-    try {
-      const parsed = JSON.parse(localStorage.getItem('kl_peer_emails') || '{}');
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
-    }
-  });
+  const [pendingEmailsByChat, setPendingEmailsByChat] = useState<Record<string, string>>({});
+  const [peerEmailsByChat, setPeerEmailsByChat] = useState<Record<string, string>>({});
+  const emailVaultLoadedRef = useRef(false);
   const [mutedChatIds, setMutedChatIds] = useState<string[]>(() => {
     if (typeof window === 'undefined') return [];
     try {
@@ -382,7 +400,10 @@ export default function App() {
   } | null>(null);
   const [gmailToast, setGmailToast] = useState('');
   const [btInitialMode, setBtInitialMode] = useState<'bluetooth' | 'nearby'>('bluetooth');
-  const [guestBluetoothOpen, setGuestBluetoothOpen] = useState(false);
+  const [guestBluetoothOpen, setGuestBluetoothOpen] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return Boolean(new URLSearchParams(window.location.search).get('offline'));
+  });
 
   // Modals & deep links
   const [connectModalOpen, setConnectModalOpen] = useState(false);
@@ -394,9 +415,16 @@ export default function App() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [profileModalTab, setProfileModalTab] = useState<'profile' | 'settings' | 'account'>('profile');
   const [peerProfileModalOpen, setPeerProfileModalOpen] = useState(false);
-  const [legalModalState, setLegalModalState] = useState<{ open: boolean; tab: PolicyTab }>({
-    open: false,
-    tab: 'privacy',
+  const [headerLangOpen, setHeaderLangOpen] = useState(false);
+  const [headerLangSearch, setHeaderLangSearch] = useState('');
+  const [legalModalState, setLegalModalState] = useState<{ open: boolean; tab: PolicyTab }>(() => {
+    if (typeof window !== 'undefined') {
+      const qPolicy = (new URLSearchParams(window.location.search).get('policy') || '').toLowerCase();
+      if (qPolicy === 'privacy' || qPolicy === 'terms' || qPolicy === 'safety' || qPolicy === 'security') {
+        return { open: true, tab: qPolicy };
+      }
+    }
+    return { open: false, tab: 'privacy' };
   });
   const [reportTarget, setReportTarget] = useState<{
     uid: string;
@@ -429,6 +457,10 @@ export default function App() {
     const match = window.location.pathname.match(/^\/nearby\/(\d{6})/);
     return match ? match[1] : '';
   });
+  const [deepOfflineCode, setDeepOfflineCode] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return new URLSearchParams(window.location.search).get('offline') || '';
+  });
   const [deepChatId, setDeepChatId] = useState(() => {
     if (typeof window === 'undefined') return '';
     return new URLSearchParams(window.location.search).get('chat') || '';
@@ -442,6 +474,12 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const feedScrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
+  const pendingSnapBottomChatRef = useRef<string | null>(null);
+  const userScrolledUpInOpenRef = useRef(false);
+  const prevEnteredChatMetaRef = useRef<{ view: string; chatId: string | null }>({
+    view: 'hub',
+    chatId: null,
+  });
   const prevScrollMetaRef = useRef<{ chatId: string | null; count: number; lastId: string | null }>({
     chatId: null,
     count: 0,
@@ -449,7 +487,10 @@ export default function App() {
   });
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoMenuRef = useRef<HTMLDivElement>(null);
   const notifContainerRef = useRef<HTMLDivElement>(null);
+  const headerLangBtnRef = useRef<HTMLButtonElement>(null);
+  const headerLangMenuRef = useRef<HTMLDivElement>(null);
   const handledDeepLinkRef = useRef(false);
   const lastTypingSentAtRef = useRef<number>(0);
   const typingTimeoutRef = useRef<number | null>(null);
@@ -458,6 +499,7 @@ export default function App() {
   const workspaceViewRef = useRef(workspaceView);
   const mutedChatIdsRef = useRef<string[]>(mutedChatIds);
   const mutedSoundChatIdsRef = useRef<string[]>(mutedSoundChatIds);
+  const langRef = useRef<AppLanguage>(lang);
   const offlinePromptCooldownRef = useRef<Map<string, number>>(new Map());
   const chatsInitializedRef = useRef(false);
   const prevChatTimeRef = useRef<Map<string, number>>(new Map());
@@ -501,6 +543,29 @@ export default function App() {
   useEffect(() => {
     activeCallRef.current = activeCall;
   }, [activeCall]);
+
+  useEffect(() => {
+    if (!headerLangOpen) return;
+    const onPointerDown = (ev: MouseEvent) => {
+      const target = ev.target as Node;
+      if (
+        headerLangBtnRef.current?.contains(target) ||
+        headerLangMenuRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setHeaderLangOpen(false);
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setHeaderLangOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [headerLangOpen]);
 
   const toggleSound = () => {
     unlockAudioNow();
@@ -592,10 +657,10 @@ export default function App() {
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const timer = window.setTimeout(() => {
       setSplashMinDone(true);
-    }, prefersReduced ? 160 : 920);
+    }, prefersReduced ? 160 : 1150);
     const maxCapTimer = window.setTimeout(() => {
       setSplashDismissed(true);
-    }, prefersReduced ? 500 : 2200);
+    }, prefersReduced ? 500 : 2400);
     return () => {
       window.clearTimeout(timer);
       window.clearTimeout(maxCapTimer);
@@ -604,7 +669,27 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('kl_lang', lang);
+    document.documentElement.lang = lang;
+    document.documentElement.dir = isRtlLanguage(lang) ? 'rtl' : 'ltr';
   }, [lang]);
+
+  useEffect(() => {
+    if (!photoMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (photoMenuRef.current && !photoMenuRef.current.contains(e.target as Node)) {
+        setPhotoMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPhotoMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [photoMenuOpen]);
 
   useEffect(() => {
     mutedChatIdsRef.current = mutedChatIds;
@@ -612,16 +697,43 @@ export default function App() {
   }, [mutedChatIds]);
 
   useEffect(() => {
+    langRef.current = lang;
+  }, [lang]);
+
+  useEffect(() => {
     mutedSoundChatIdsRef.current = mutedSoundChatIds;
     localStorage.setItem('kl_muted_sound_chats', JSON.stringify(mutedSoundChatIds));
   }, [mutedSoundChatIds]);
 
   useEffect(() => {
-    localStorage.setItem('kl_peer_emails', JSON.stringify(peerEmailsByChat));
+    let active = true;
+    (async () => {
+      const [vaultPeer, vaultPending] = await Promise.all([
+        decryptVaultJson<Record<string, string>>('kl_vault_v1_peer_emails', 'kl_peer_emails'),
+        decryptVaultJson<Record<string, string>>('kl_vault_v1_pending_emails', 'kl_pending_emails'),
+      ]);
+      if (!active) return;
+      if (vaultPeer && typeof vaultPeer === 'object') {
+        setPeerEmailsByChat((prev) => ({ ...vaultPeer, ...prev }));
+      }
+      if (vaultPending && typeof vaultPending === 'object') {
+        setPendingEmailsByChat((prev) => ({ ...vaultPending, ...prev }));
+      }
+      emailVaultLoadedRef.current = true;
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!emailVaultLoadedRef.current) return;
+    void encryptVaultJson('kl_vault_v1_peer_emails', peerEmailsByChat);
   }, [peerEmailsByChat]);
 
   useEffect(() => {
-    localStorage.setItem('kl_pending_emails', JSON.stringify(pendingEmailsByChat));
+    if (!emailVaultLoadedRef.current) return;
+    void encryptVaultJson('kl_vault_v1_pending_emails', pendingEmailsByChat);
   }, [pendingEmailsByChat]);
 
   useEffect(() => {
@@ -632,9 +744,19 @@ export default function App() {
     localStorage.setItem('kl_pinned_chats', JSON.stringify(pinnedChatIds));
   }, [pinnedChatIds]);
 
-  // Auth listener
+  // Auth listener (with offline fast-ready guard so offline Bluetooth/Code never hangs)
   useEffect(() => {
+    const offlineFallbackTimer =
+      typeof navigator !== 'undefined' && navigator.onLine === false
+        ? window.setTimeout(() => {
+            setAuthReady(true);
+          }, 1400)
+        : null;
+
     const unsub = onAuthStateChanged(auth, async (user) => {
+      if (offlineFallbackTimer !== null) {
+        window.clearTimeout(offlineFallbackTimer);
+      }
       setFirebaseUser(user);
       if (!user) {
         justSignedInUidRef.current = null;
@@ -657,8 +779,8 @@ export default function App() {
         setAppLocked(
           justSignedInUidRef.current === pub.uid ? false : isAppLockEnabled(pub.uid)
         );
-        if (priv.language === 'bn' || priv.language === 'en') {
-          setLang(priv.language);
+        if (priv.language) {
+          setLang(normalizeAppLanguage(priv.language));
         }
         if (Array.isArray(priv.pinnedChatIds)) {
           setPinnedChatIds(priv.pinnedChatIds.slice(0, LIMITS.PINNED_CHATS_MAX));
@@ -677,8 +799,35 @@ export default function App() {
         setAuthReady(true);
       }
     });
-    return () => unsub();
+    return () => {
+      if (offlineFallbackTimer !== null) {
+        window.clearTimeout(offlineFallbackTimer);
+      }
+      unsub();
+    };
   }, []);
+
+  // Real-time cross-device self profile & settings listener
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (!uid) return;
+    const unsubPub = subscribeOwnUserProfile(uid, (prof) => {
+      setPublicProfile(prof);
+    });
+    const unsubPriv = subscribeOwnPrivateInfo(uid, (priv) => {
+      setPrivateInfo(priv);
+      if (priv.language) {
+        setLang(normalizeAppLanguage(priv.language));
+      }
+      if (Array.isArray(priv.pinnedChatIds)) {
+        setPinnedChatIds(priv.pinnedChatIds.slice(0, LIMITS.PINNED_CHATS_MAX));
+      }
+    });
+    return () => {
+      unsubPub();
+      unsubPriv();
+    };
+  }, [firebaseUser?.uid]);
 
   // App PIN Auto-Lock (visibility + inactivity timer)
   useEffect(() => {
@@ -749,7 +898,7 @@ export default function App() {
           setConnectModalTab('invite');
           setConnectModalOpen(true);
         });
-    } else if (deepNearbyCode) {
+    } else if (deepNearbyCode || deepOfflineCode) {
       handledDeepLinkRef.current = true;
       window.history.replaceState({}, '', window.location.pathname);
       setBtInitialMode('nearby');
@@ -761,7 +910,7 @@ export default function App() {
       setWorkspaceView('chat');
       setDeepChatId('');
     }
-  }, [publicProfile, deepInviteCode, deepNearbyCode, deepChatId, chats]);
+  }, [publicProfile, deepInviteCode, deepNearbyCode, deepOfflineCode, deepChatId, chats]);
 
   // Firebase Presence Heartbeat (updates lastSeenAt & onlineStatus in real time)
   useEffect(() => {
@@ -831,6 +980,7 @@ export default function App() {
       setActiveCall(null);
       return;
     }
+    void warmRtcConfig();
     return subscribeIncomingCalls(publicProfile.uid, (incomingList) => {
       if (activeCallRef.current) return;
       const nextCall = incomingList.find((c) => !dismissedCallIdsRef.current.has(c.id));
@@ -847,13 +997,13 @@ export default function App() {
       });
       if (document.hidden && getNotificationPermission() === 'granted' && !mutedChatIdsRef.current.includes(nextCall.chatId)) {
         void showBackgroundNotification({
-          title: t(lang, nextCall.mode === 'video' ? 'incomingVideoCall' : 'incomingVoiceCall'),
+          title: t(langRef.current, nextCall.mode === 'video' ? 'incomingVideoCall' : 'incomingVoiceCall'),
           body: `${nextCall.callerName}`,
           chatId: nextCall.chatId,
         });
       }
     });
-  }, [publicProfile?.uid, lang]);
+  }, [publicProfile?.uid]);
 
   // Subscribe to user's chats + play incoming chime & show alert banner on new messages
   useEffect(() => {
@@ -1141,79 +1291,6 @@ export default function App() {
     return unconfirmed.length > 0 ? [...messages, ...unconfirmed] : messages;
   }, [messages, optimisticByChat, activeChatId]);
 
-  const trimmedChatSearch = chatSearchQuery.trim();
-  const matchingMessageIds = useMemo(() => {
-    if (!trimmedChatSearch) return [] as string[];
-    const needle = trimmedChatSearch.toLowerCase();
-    return renderedMessages
-      .filter((m) => {
-        const inText = m.text?.toLowerCase().includes(needle);
-        const inReply = m.replyToText?.toLowerCase().includes(needle);
-        const inAttachment = m.attachmentName?.toLowerCase().includes(needle);
-        return Boolean(inText || inReply || inAttachment);
-      })
-      .map((m) => m.id);
-  }, [renderedMessages, trimmedChatSearch]);
-
-  const activeSearchMatchId =
-    matchingMessageIds.length > 0
-      ? matchingMessageIds[Math.min(chatSearchMatchIdx, matchingMessageIds.length - 1)]
-      : null;
-
-  const displayedMessages = useMemo(() => {
-    if (!trimmedChatSearch || !chatSearchFilterOnly) return renderedMessages;
-    const matchSet = new Set(matchingMessageIds);
-    return renderedMessages.filter((m) => matchSet.has(m.id));
-  }, [renderedMessages, trimmedChatSearch, chatSearchFilterOnly, matchingMessageIds]);
-
-  const renderedMessageIndexMap = useMemo(() => {
-    const map = new Map<string, number>();
-    for (let i = 0; i < renderedMessages.length; i++) {
-      map.set(renderedMessages[i].id, i);
-    }
-    return map;
-  }, [renderedMessages]);
-
-  // Reset in-chat search cleanly when switching conversations
-  useEffect(() => {
-    setChatSearchQuery('');
-    setChatSearchMatchIdx(0);
-  }, [activeChatId]);
-
-  // Keep match index in range and smoothly scroll active match into view
-  useEffect(() => {
-    if (matchingMessageIds.length === 0) {
-      if (chatSearchMatchIdx !== 0) setChatSearchMatchIdx(0);
-      return;
-    }
-    const clampedIdx = Math.min(chatSearchMatchIdx, matchingMessageIds.length - 1);
-    if (clampedIdx !== chatSearchMatchIdx) {
-      setChatSearchMatchIdx(clampedIdx);
-      return;
-    }
-    const targetId = matchingMessageIds[clampedIdx];
-    const container = feedScrollRef.current;
-    if (!container || !targetId) return;
-    const targetEl = container.querySelector(`[data-msg-id="${CSS.escape(targetId)}"]`);
-    if (targetEl) {
-      targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }, [matchingMessageIds, chatSearchMatchIdx, chatSearchFilterOnly]);
-
-  // Support Ctrl/Cmd+F to focus the active conversation search bar
-  useEffect(() => {
-    if (workspaceView !== 'chat' || !activeChatId) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-        e.preventDefault();
-        chatSearchInputRef.current?.focus();
-        chatSearchInputRef.current?.select();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [workspaceView, activeChatId]);
-
   const activePeerTypers = useMemo(() => {
     if (!publicProfile) return [];
     return typingStatuses.filter((s) => {
@@ -1234,11 +1311,51 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [publicProfile, activePeerTypers.length]);
 
+  const snapFeedToVeryBottom = useCallback(() => {
+    const el = feedScrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    isNearBottomRef.current = true;
+    setShowNewMsgBtn(false);
+    setUnseenScrollCount(0);
+  }, []);
+
+  const setFeedScrollNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      feedScrollRef.current = node;
+      if (node && activeChatId && pendingSnapBottomChatRef.current === activeChatId) {
+        node.scrollTop = node.scrollHeight;
+        isNearBottomRef.current = true;
+        setShowNewMsgBtn(false);
+        setUnseenScrollCount(0);
+        window.requestAnimationFrame(() => {
+          if (!userScrolledUpInOpenRef.current && feedScrollRef.current === node) {
+            node.scrollTop = node.scrollHeight;
+            messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+          }
+        });
+      }
+    },
+    [activeChatId]
+  );
+
+  const scrollFeedToTop = useCallback((smooth = true) => {
+    userScrolledUpInOpenRef.current = true;
+    pendingSnapBottomChatRef.current = null;
+    feedScrollRef.current?.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' });
+  }, []);
+
   const scrollFeedToBottom = useCallback((smooth = true) => {
     isNearBottomRef.current = true;
     setShowNewMsgBtn(false);
     setUnseenScrollCount(0);
-    messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' });
+    const el = feedScrollRef.current;
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
   }, []);
 
   const handleFeedScroll = useCallback(() => {
@@ -1247,14 +1364,32 @@ export default function App() {
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const nearBottom = distanceFromBottom <= 110;
     isNearBottomRef.current = nearBottom;
-    if (nearBottom) {
+    if (!nearBottom) {
+      userScrolledUpInOpenRef.current = true;
+      pendingSnapBottomChatRef.current = null;
+    } else {
       setShowNewMsgBtn(false);
       setUnseenScrollCount(0);
     }
   }, []);
 
-  // Smart auto-scroll: jump on chat switch, auto-scroll only if near bottom or own message, else show "New Message" FAB
+  // Track whenever user enters any chat view (sidebar click, profile open, invite link, or banner)
   useEffect(() => {
+    const prev = prevEnteredChatMetaRef.current;
+    const enteredChatView =
+      workspaceView === 'chat' &&
+      Boolean(activeChatId) &&
+      (prev.view !== 'chat' || prev.chatId !== activeChatId);
+    prevEnteredChatMetaRef.current = { view: workspaceView, chatId: activeChatId };
+    if (enteredChatView && activeChatId) {
+      pendingSnapBottomChatRef.current = activeChatId;
+      userScrolledUpInOpenRef.current = false;
+      isNearBottomRef.current = true;
+    }
+  }, [workspaceView, activeChatId]);
+
+  // Smart auto-scroll: always snap directly to the very last message when opening a chat/profile, else follow new messages near bottom
+  useLayoutEffect(() => {
     const lastMsg = renderedMessages[renderedMessages.length - 1];
     const lastId = lastMsg?.id ?? null;
     const prev = prevScrollMetaRef.current;
@@ -1267,10 +1402,32 @@ export default function App() {
       lastId,
     };
 
-    if (!activeChatId) {
+    if (!activeChatId || workspaceView !== 'chat') {
       setShowNewMsgBtn(false);
       setUnseenScrollCount(0);
       isNearBottomRef.current = true;
+      return;
+    }
+
+    if (pendingSnapBottomChatRef.current === activeChatId) {
+      snapFeedToVeryBottom();
+      if (renderedMessages.length > 0 && feedScrollRef.current) {
+        pendingSnapBottomChatRef.current = null;
+        const rafId = window.requestAnimationFrame(() => {
+          if (!userScrolledUpInOpenRef.current) snapFeedToVeryBottom();
+        });
+        const t1 = window.setTimeout(() => {
+          if (!userScrolledUpInOpenRef.current) snapFeedToVeryBottom();
+        }, 190);
+        const t2 = window.setTimeout(() => {
+          if (!userScrolledUpInOpenRef.current) snapFeedToVeryBottom();
+        }, 380);
+        return () => {
+          window.cancelAnimationFrame(rafId);
+          window.clearTimeout(t1);
+          window.clearTimeout(t2);
+        };
+      }
       return;
     }
 
@@ -1278,9 +1435,7 @@ export default function App() {
       isNearBottomRef.current = true;
       setShowNewMsgBtn(false);
       setUnseenScrollCount(0);
-      window.requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-      });
+      snapFeedToVeryBottom();
       return;
     }
 
@@ -1296,9 +1451,17 @@ export default function App() {
     }
 
     if (activePeerTypers.length > 0 && isNearBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
-  }, [activeChatId, renderedMessages, activePeerTypers.length, publicProfile, scrollFeedToBottom]);
+  }, [
+    activeChatId,
+    workspaceView,
+    renderedMessages,
+    activePeerTypers.length,
+    publicProfile,
+    scrollFeedToBottom,
+    snapFeedToVeryBottom,
+  ]);
 
   const activeChat = useMemo(
     () => chats.find((c) => c.id === activeChatId) || null,
@@ -1453,12 +1616,14 @@ export default function App() {
               return {
                 ...item,
                 displayName: live.displayName || item.displayName,
-                photoUrl: live.photoUrl || item.photoUrl,
+                photoUrl: live.photoUrl !== undefined ? live.photoUrl : item.photoUrl,
                 bio: live.bio || item.bio,
-                maskedEmail: live.maskedEmail || item.maskedEmail,
+                maskedEmail: live.showGmail === false ? '' : live.maskedEmail || item.maskedEmail,
+                showGmail: live.showGmail !== false,
                 onlineStatus: live.onlineStatus,
                 lastSeenAt: live.lastSeenAt,
                 showOnlineStatus: live.showOnlineStatus,
+                onlineVisibility: live.onlineVisibility,
               };
             })
           );
@@ -1481,6 +1646,12 @@ export default function App() {
 
   const handleGoogleSignIn = async () => {
     unlockAudioNow();
+    if (!agreeTerms || !agreePrivacy || !agreeSecurity) {
+      setAuthError(t(lang, 'consentMissingError'));
+      setConsentFlash(true);
+      window.setTimeout(() => setConsentFlash(false), 550);
+      return;
+    }
     setAuthError('');
     setAuthLoading(true);
     try {
@@ -1495,8 +1666,11 @@ export default function App() {
         setFirebaseUser(result.user);
         setPublicProfile(pub);
         setPrivateInfo(priv);
-        if (priv.language === 'bn' || priv.language === 'en') {
-          setLang(priv.language);
+        if (priv.acceptedPolicyVersion !== CURRENT_POLICY_VERSION) {
+          void acceptPolicyVersion({ uid: result.user.uid, version: CURRENT_POLICY_VERSION }).catch(() => {});
+        }
+        if (priv.language) {
+          setLang(normalizeAppLanguage(priv.language));
         }
         if (Array.isArray(priv.pinnedChatIds)) {
           setPinnedChatIds(priv.pinnedChatIds.slice(0, LIMITS.PINNED_CHATS_MAX));
@@ -1531,6 +1705,10 @@ export default function App() {
   const handleSignOut = async () => {
     setProfileModalOpen(false);
     setAppLocked(false);
+    setAgreeTerms(false);
+    setAgreePrivacy(false);
+    setAgreeSecurity(false);
+    setAuthError('');
     justSignedInUidRef.current = null;
     clearGmailAccessToken();
     if (publicProfile?.uid) {
@@ -1817,7 +1995,9 @@ export default function App() {
         if (nowMs - lastPromptedAt > 120_000) {
           offlinePromptCooldownRef.current.set(targetChat.id, nowMs);
           const savedEmail =
-            peerEmailsByChat[targetChat.id] || pendingEmailsByChat[targetChat.id] || '';
+            peerProfile?.showGmail === false
+              ? ''
+              : peerEmailsByChat[targetChat.id] || pendingEmailsByChat[targetChat.id] || '';
           setOfflineEmailPrompt({
             chatId: targetChat.id,
             peerName: getChatDisplayName(targetChat),
@@ -2014,8 +2194,8 @@ export default function App() {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: 'KothaLink Chat',
-          text: 'Chat with me on KothaLink via Gmail, Invite Code, or Nearby:',
+          title: 'LoopLy Chat',
+          text: 'Chat with me on LoopLy via Gmail, Invite Code, or Nearby:',
           url,
         });
         return;
@@ -2038,10 +2218,10 @@ export default function App() {
   const shareChatInvite = async (chat: ChatRoom) => {
     if (!chat.inviteCode) return;
     const url = getInviteUrl(chat.inviteCode);
-    const shareText = `Join my chat on KothaLink (Code: ${chat.inviteCode}): ${url}`;
+    const shareText = `Join my chat on LoopLy (Code: ${chat.inviteCode}): ${url}`;
     if (navigator.share) {
       try {
-        await navigator.share({ title: 'KothaLink Chat Invite', text: shareText, url });
+        await navigator.share({ title: 'LoopLy Chat Invite', text: shareText, url });
         return;
       } catch {
         // Fall through to copy
@@ -2052,6 +2232,12 @@ export default function App() {
 
   const openChat = (chatId: string) => {
     unlockAudioNow();
+    if (activeChatId !== chatId) {
+      setMessages([]);
+    }
+    pendingSnapBottomChatRef.current = chatId;
+    userScrolledUpInOpenRef.current = false;
+    isNearBottomRef.current = true;
     setActiveChatId(chatId);
     setWorkspaceView('chat');
     setReplyingTo(null);
@@ -2097,6 +2283,11 @@ export default function App() {
 
   const getChatDisplayName = (chat: ChatRoom): string => {
     if (!publicProfile) return chat.title;
+    const peerUid = chat.participantIds.find((id) => id !== publicProfile.uid);
+    const livePeer = peerUid ? peerProfiles[peerUid] : undefined;
+    if (livePeer?.displayName?.trim()) {
+      return livePeer.displayName;
+    }
     if (chat.creatorId === publicProfile.uid) {
       return chat.peerName || chat.title;
     }
@@ -2155,27 +2346,36 @@ export default function App() {
           <BluetoothNearbyPanel
             lang={lang}
             currentUser={null}
-            initialMode="bluetooth"
-            onRequireAuth={() => setGuestBluetoothOpen(false)}
-            onClose={() => setGuestBluetoothOpen(false)}
+            initialMode={deepOfflineCode || deepNearbyCode ? 'nearby' : 'bluetooth'}
+            initialNearbyCode={deepNearbyCode}
+            initialOfflineCode={deepOfflineCode}
+            onRequireAuth={() => {
+              setDeepOfflineCode('');
+              setGuestBluetoothOpen(false);
+            }}
+            onClose={() => {
+              setDeepOfflineCode('');
+              setGuestBluetoothOpen(false);
+            }}
           />
         </div>
       );
     } else {
       appBody = (
-      <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col">
+      <div className="h-[100dvh] w-full overflow-y-auto overflow-x-hidden overscroll-y-auto bg-slate-50 dark:bg-slate-950 flex flex-col">
         {/* Clean 3-zone Top Bar */}
-        <header className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between gap-3 sm:gap-8">
-          <KothaLinkLogo variant="compact" />
+        <header className="sticky top-0 z-30 shrink-0 px-3 sm:px-6 py-3 sm:py-3.5 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between gap-2 sm:gap-6">
+          <LoopLyLogo variant="compact" className="shrink-0" />
 
-          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
+          <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
             <span className="whitespace-nowrap shrink-0">Gmail</span>
             <span className="whitespace-nowrap shrink-0">Invite Code</span>
-            <span className="whitespace-nowrap shrink-0">Nearby QR</span>
+            <span className="whitespace-nowrap shrink-0">Offline Code / QR</span>
             <span className="whitespace-nowrap shrink-0">Web Bluetooth</span>
           </nav>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <PWAInstallButton lang={lang} />
             <div className="hidden sm:grid grid-cols-2 gap-0.5 p-0.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
               {(
                 [
@@ -2208,41 +2408,160 @@ export default function App() {
               type="button"
               onClick={cycleThemeMode}
               aria-label="Switch theme"
-              className="sm:hidden min-h-[40px] px-2.5 flex items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900"
+              className="sm:hidden min-h-[38px] px-2 flex items-center justify-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900"
             >
               {themeMode === 'dark' ? (
-                <Moon className="w-4 h-4" />
+                <Moon className="w-4 h-4 shrink-0" />
               ) : (
-                <Sun className="w-4 h-4 text-amber-500" />
+                <Sun className="w-4 h-4 text-amber-500 shrink-0" />
               )}
-              <span>{t(lang, themeMode === 'dark' ? 'darkMode' : 'lightMode')}</span>
+              <span className="hidden xs:inline">{t(lang, themeMode === 'dark' ? 'darkMode' : 'lightMode')}</span>
             </button>
             <button
+              ref={headerLangBtnRef}
               type="button"
-              onClick={() => setLang(lang === 'en' ? 'bn' : 'en')}
-              className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900 whitespace-nowrap"
+              onClick={() => {
+                setHeaderLangSearch('');
+                setHeaderLangOpen((prev) => !prev);
+              }}
+              aria-label={t(lang, 'allLanguagesLabel')}
+              aria-expanded={headerLangOpen}
+              title={
+                WORLD_LANGUAGES.find((item) => item.code === lang)?.nativeName ||
+                t(lang, 'allLanguagesLabel')
+              }
+              className={`min-h-[38px] min-w-[38px] px-2.5 flex items-center justify-center rounded-xl border transition-colors ${
+                headerLangOpen
+                  ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400'
+                  : 'border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900'
+              }`}
             >
-              {lang === 'en' ? 'বাংলা' : 'EN'}
+              <Globe className="w-4 h-4 shrink-0" />
             </button>
+
+            <AnimatePresence>
+              {headerLangOpen && (
+                <motion.div
+                  ref={headerLangMenuRef}
+                  initial={{ opacity: 0, y: 6, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                  transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+                  className="fixed top-[58px] sm:top-[62px] right-3 sm:right-6 z-50 w-[min(340px,calc(100vw-24px))] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl overflow-hidden"
+                >
+                  <div className="px-3.5 py-2.5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Globe className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                      <span className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                        {t(lang, 'allLanguagesLabel')}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setHeaderLangOpen(false)}
+                      aria-label="Close"
+                      className="min-h-[30px] min-w-[30px] flex items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="p-2.5 border-b border-slate-100 dark:border-slate-800">
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={headerLangSearch}
+                        onChange={(e) => setHeaderLangSearch(e.target.value)}
+                        placeholder={t(lang, 'searchLanguagesPlaceholder')}
+                        className="w-full min-h-[36px] pl-8 pr-8 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                      />
+                      {headerLangSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setHeaderLangSearch('')}
+                          aria-label="Clear"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 grid grid-cols-2 gap-1.5 max-h-64 overflow-y-auto">
+                    {WORLD_LANGUAGES.filter((item) => {
+                      const q = headerLangSearch.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        item.nativeName.toLowerCase().includes(q) ||
+                        item.englishName.toLowerCase().includes(q) ||
+                        item.code.toLowerCase().includes(q)
+                      );
+                    }).map((item) => {
+                      const isSel = lang === item.code;
+                      return (
+                        <button
+                          key={item.code}
+                          type="button"
+                          onClick={() => {
+                            setLang(item.code);
+                            setHeaderLangOpen(false);
+                            setHeaderLangSearch('');
+                          }}
+                          className={`px-2.5 py-2 rounded-xl border text-left transition-colors flex items-center justify-between gap-1.5 ${
+                            isSel
+                              ? 'bg-blue-600 border-blue-600 text-white'
+                              : 'bg-slate-50/70 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 hover:border-blue-400'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold truncate">{item.nativeName}</div>
+                            <div
+                              className={`text-[10px] truncate ${
+                                isSel ? 'text-blue-100' : 'text-slate-400'
+                              }`}
+                            >
+                              {item.englishName}
+                            </div>
+                          </div>
+                          {isSel && <Check className="w-3.5 h-3.5 shrink-0" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </header>
 
-        <main className="flex-1 flex items-center justify-center p-4 sm:p-6">
+        {!isOnline && (
+          <OfflineIndicator
+            lang={lang}
+            onOpenOfflineMode={() => {
+              unlockAudioNow();
+              setGuestBluetoothOpen(true);
+            }}
+          />
+        )}
+
+        <main className="flex-1 w-full px-3.5 sm:px-6 lg:px-8 py-5 sm:py-8 pb-12 flex flex-col">
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="max-w-5xl w-full grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-8 items-stretch"
+            className="max-w-5xl w-full mx-auto my-auto grid grid-cols-1 md:grid-cols-12 gap-5 sm:gap-6 lg:gap-8 items-stretch"
           >
             {/* Left Sign-in Column */}
-            <div className="lg:col-span-7 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-8 flex flex-col justify-between space-y-6 sm:space-y-8">
-              <div className="space-y-5">
-                <KothaLinkLogo variant="hero" />
-                <div className="space-y-3 pt-1">
+            <div className="md:col-span-7 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 sm:p-6 lg:p-8 flex flex-col justify-between space-y-5 sm:space-y-6">
+              <div className="space-y-4">
+                <LoopLyLogo variant="hero" />
+                <div className="space-y-2.5 pt-1">
                   <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
                     Gmail · Invite Code · Bluetooth · Nearby P2P
                   </p>
-                  <h1 className="font-display text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 dark:text-white text-balance">
+                  <h1 className="font-display text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-slate-900 dark:text-white text-balance">
                     {t(lang, 'tagline')}
                   </h1>
                   <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300 leading-relaxed max-w-xl">
@@ -2284,16 +2603,118 @@ export default function App() {
                   </div>
                 )}
 
+                {/* 3 Mandatory Unchecked Security & Legal Agreements */}
+                <motion.div
+                  animate={consentFlash ? { x: [0, -6, 6, -4, 4, 0] } : { x: 0 }}
+                  transition={{ duration: 0.35 }}
+                  className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2"
+                >
+                  <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-200/80 dark:border-slate-800">
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-700 dark:text-slate-200">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      <span>{t(lang, 'encryptionActiveBadge')}</span>
+                    </span>
+                    <span className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                      {agreeTerms && agreePrivacy && agreeSecurity ? '3 / 3 ✓' : `${Number(agreeTerms) + Number(agreePrivacy) + Number(agreeSecurity)} / 3`}
+                    </span>
+                  </div>
+
+                  {(
+                    [
+                      {
+                        id: 'terms',
+                        checked: agreeTerms,
+                        onToggle: () => {
+                          setAgreeTerms((v) => !v);
+                          setAuthError('');
+                        },
+                        prefix: t(lang, 'consentTermsLabel'),
+                        linkLabel: t(lang, 'termsOfServiceTitle'),
+                        tab: 'terms' as PolicyTab,
+                      },
+                      {
+                        id: 'privacy',
+                        checked: agreePrivacy,
+                        onToggle: () => {
+                          setAgreePrivacy((v) => !v);
+                          setAuthError('');
+                        },
+                        prefix: t(lang, 'consentPrivacyLabel'),
+                        linkLabel: t(lang, 'privacyPolicyTitle'),
+                        tab: 'privacy' as PolicyTab,
+                      },
+                      {
+                        id: 'security',
+                        checked: agreeSecurity,
+                        onToggle: () => {
+                          setAgreeSecurity((v) => !v);
+                          setAuthError('');
+                        },
+                        prefix: t(lang, 'consentSecurityLabel'),
+                        linkLabel: t(lang, 'consentSecurityLink'),
+                        tab: 'security' as PolicyTab,
+                      },
+                    ] as const
+                  ).map((box) => (
+                    <div
+                      key={box.id}
+                      className={`min-h-[44px] px-2.5 py-2 rounded-xl border transition-colors flex items-center gap-3 cursor-pointer ${
+                        box.checked
+                          ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/60'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-700'
+                      }`}
+                      onClick={box.onToggle}
+                    >
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={box.checked}
+                        aria-label={`${box.prefix} ${box.linkLabel}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          box.onToggle();
+                        }}
+                        className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+                          box.checked
+                            ? 'bg-blue-600 border-blue-600 text-white'
+                            : 'bg-white dark:bg-slate-950 border-slate-300 dark:border-slate-600 text-transparent'
+                        }`}
+                      >
+                        <Check className="w-3.5 h-3.5 stroke-[3]" />
+                      </button>
+                      <span className="text-xs text-slate-700 dark:text-slate-200 leading-snug">
+                        {box.prefix}{' '}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setLegalModalState({ open: true, tab: box.tab });
+                          }}
+                          className="font-semibold text-blue-600 dark:text-blue-400 hover:underline inline"
+                        >
+                          {box.linkLabel}
+                        </button>
+                      </span>
+                    </div>
+                  ))}
+                </motion.div>
+
                 <motion.button
                   type="button"
                   whileTap={{ scale: 0.98 }}
-                  disabled={authLoading}
+                  disabled={authLoading || !agreeTerms || !agreePrivacy || !agreeSecurity}
                   onClick={handleGoogleSignIn}
-                  className="w-full min-h-[48px] px-6 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2.5"
+                  className="w-full min-h-[48px] px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 disabled:opacity-45 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-md shadow-blue-600/20 transition-all flex items-center justify-center gap-2.5"
                 >
                   <Mail className="w-4 h-4" />
                   {authLoading ? t(lang, 'signingIn') : t(lang, 'signInGoogle')}
                 </motion.button>
+
+                {(!agreeTerms || !agreePrivacy || !agreeSecurity) && (
+                  <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400 text-center sm:text-left">
+                    {t(lang, 'consentRequiredHint')}
+                  </p>
+                )}
 
                 <motion.button
                   type="button"
@@ -2308,35 +2729,30 @@ export default function App() {
                   {t(lang, 'tryBluetoothNow')}
                 </motion.button>
 
-                <div className="pt-1 space-y-2 text-center sm:text-left">
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                    {t(lang, 'policyAgreeNotice')}
-                  </p>
-                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-3 gap-y-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400">
-                    {(
-                      [
-                        { id: 'privacy' as const, label: t(lang, 'privacyPolicyTitle') },
-                        { id: 'terms' as const, label: t(lang, 'termsOfServiceTitle') },
-                        { id: 'safety' as const, label: t(lang, 'safetyPolicyTitle') },
-                        { id: 'security' as const, label: t(lang, 'securityInfoTitle') },
-                      ] as const
-                    ).map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => setLegalModalState({ open: true, tab: item.id })}
-                        className="hover:underline"
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
+                <div className="pt-1 flex flex-wrap items-center justify-center sm:justify-start gap-x-3 gap-y-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                  {(
+                    [
+                      { id: 'privacy' as const, label: t(lang, 'privacyPolicyTitle') },
+                      { id: 'terms' as const, label: t(lang, 'termsOfServiceTitle') },
+                      { id: 'safety' as const, label: t(lang, 'safetyPolicyTitle') },
+                      { id: 'security' as const, label: t(lang, 'securityInfoTitle') },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setLegalModalState({ open: true, tab: item.id })}
+                      className="hover:underline"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
               </div>
             </div>
 
             {/* Right Channel Overview Column */}
-            <div className="lg:col-span-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="md:col-span-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 flex flex-col justify-between divide-y divide-slate-100 dark:divide-slate-800">
               <div className="pb-5 flex items-start gap-4">
                 <div className="w-10 h-10 rounded-xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
                   <Mail className="w-5 h-5" />
@@ -2439,10 +2855,10 @@ export default function App() {
       <aside
         className={`${
           isMobileDetailActive ? 'hidden md:flex' : 'flex'
-        } w-full md:w-[340px] lg:w-[360px] shrink-0 flex-col border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 h-full`}
+        } w-full md:w-[300px] lg:w-[340px] xl:w-[368px] shrink-0 flex-col border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 h-full min-h-0 overflow-hidden`}
       >
         {/* Sidebar Header */}
-        <div className="px-3 sm:px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+        <div className="px-2.5 sm:px-4 py-2.5 sm:py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
             onClick={() => {
@@ -2451,10 +2867,10 @@ export default function App() {
             }}
             className="text-left shrink-0"
           >
-            <KothaLinkLogo variant="compact" />
+            <LoopLyLogo variant="compact" />
           </button>
 
-          <div className="flex items-center gap-1 shrink-0">
+          <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
             {/* Workable Interactive Notification Center Bell */}
             <div ref={notifContainerRef} className="relative">
               <button
@@ -2670,7 +3086,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                setProfileModalTab('settings');
+                setProfileModalTab('profile');
                 setProfileModalOpen(true);
               }}
               aria-label="Settings"
@@ -2680,6 +3096,17 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {!isOnline && (
+          <OfflineIndicator
+            lang={lang}
+            onOpenOfflineMode={() => {
+              setActiveChatId(null);
+              setBtInitialMode('bluetooth');
+              setWorkspaceView('bluetooth');
+            }}
+          />
+        )}
 
         {/* Search & Channel Filter */}
         <div className="p-3 space-y-2.5 border-b border-slate-100 dark:border-slate-900 shrink-0">
@@ -2882,7 +3309,10 @@ export default function App() {
               {Array.from(friendStatusGroups.entries()).map(([uid, group]) => {
                 const first = group[0];
                 const peerProf = peerProfiles[uid];
-                const online = isPeerOnline(peerProf, nowTick);
+                const showPres = canSeePeerPresence(peerProf, true);
+                const online = isPeerOnline(peerProf, nowTick, true);
+                const statusAuthorPhoto = peerProf ? peerProf.photoUrl : first.photoUrl;
+                const statusAuthorName = peerProf?.displayName || first.displayName;
                 return (
                   <motion.button
                     key={uid}
@@ -2893,7 +3323,7 @@ export default function App() {
                       setStatusViewer({
                         statuses: group,
                         initialIndex: 0,
-                        authorOnline: online,
+                        authorOnline: showPres ? online : undefined,
                       })
                     }
                     className="flex flex-col items-center gap-1 shrink-0 group"
@@ -2908,14 +3338,14 @@ export default function App() {
                       {first.mediaType === 'image' && first.imageData ? (
                         <img
                           src={first.imageData}
-                          alt={first.displayName}
+                          alt={statusAuthorName}
                           referrerPolicy="no-referrer"
                           className="w-full h-full rounded-full object-cover border-2 border-white dark:border-slate-950"
                         />
-                      ) : first.photoUrl ? (
+                      ) : statusAuthorPhoto ? (
                         <img
-                          src={first.photoUrl}
-                          alt={first.displayName}
+                          src={statusAuthorPhoto}
+                          alt={statusAuthorName}
                           referrerPolicy="no-referrer"
                           className="w-full h-full rounded-full object-cover border-2 border-white dark:border-slate-950"
                         />
@@ -2925,17 +3355,19 @@ export default function App() {
                             STATUS_GRADIENTS[first.bgGradient] || STATUS_GRADIENTS.blue
                           }`}
                         >
-                          {first.displayName.slice(0, 1).toUpperCase()}
+                          {statusAuthorName.slice(0, 1).toUpperCase()}
                         </div>
                       )}
-                      <span
-                        className={`absolute bottom-0 right-0 w-3 h-3 rounded-full ring-2 ring-white dark:ring-slate-950 ${
-                          online ? 'bg-emerald-500' : 'bg-red-500'
-                        }`}
-                      />
+                      {showPres && (
+                        <span
+                          className={`absolute bottom-0 right-0 w-3 h-3 rounded-full ring-2 ring-white dark:ring-slate-950 ${
+                            online ? 'bg-emerald-500' : 'bg-red-500'
+                          }`}
+                        />
+                      )}
                     </div>
                     <span className="text-[11px] font-medium text-slate-700 dark:text-slate-300 max-w-[56px] truncate">
-                      {first.displayName.split(' ')[0]}
+                      {statusAuthorName.split(' ')[0]}
                     </span>
                   </motion.button>
                 );
@@ -2946,7 +3378,7 @@ export default function App() {
 
         {/* Chat List with Blinking Green Online Ring + Red Offline Dot + Blinking Yellow Unread Dot */}
         <div
-          className={`flex-1 px-3 pt-3 space-y-1 chat-list-scroll${
+          className={`flex-1 min-h-0 px-3 pt-3 space-y-1 chat-list-scroll${
             hasNetlifyBadge ? ' has-netlify-badge' : ''
           }`}
         >
@@ -2975,8 +3407,9 @@ export default function App() {
               {filteredChats.map((chat) => {
                 const name = getChatDisplayName(chat);
                 const peer = getChatPeerProfile(chat);
-                const online = isPeerOnline(peer, nowTick);
-                const presenceText = formatPresenceLabel(peer, lang, nowTick);
+                const showPres = canSeePeerPresence(peer, true);
+                const online = isPeerOnline(peer, nowTick, true);
+                const presenceText = formatPresenceLabel(peer, lang, nowTick, true);
                 const isSelected = activeChatId === chat.id && workspaceView === 'chat';
                 const hasUnread = unreadChatIds.has(chat.id);
                 const isPinned = pinnedOrderMap.has(chat.id);
@@ -3000,7 +3433,7 @@ export default function App() {
                         name={name}
                         photoUrl={peer?.photoUrl}
                         size="lg"
-                        isOnline={online}
+                        isOnline={showPres ? online : undefined}
                         hasUnread={hasUnread}
                         presenceTitle={presenceText}
                         ringColorClass="ring-white dark:ring-slate-950"
@@ -3085,7 +3518,7 @@ export default function App() {
                 return (
                   <div className="pt-2.5 mt-2 border-t border-slate-100 dark:border-slate-900 space-y-1.5">
                     <div className="px-1.5 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      <span>{t(lang, 'peopleOnKothaLink')}</span>
+                      <span>{t(lang, 'peopleOnLoopLy')}</span>
                       {sidebarSearchingPeople && (
                         <Loader2 className="w-3 h-3 animate-spin text-blue-600" />
                       )}
@@ -3117,14 +3550,15 @@ export default function App() {
                       ) : null
                     ) : (
                       discoverable.map((person) => {
-                        const online =
-                          person.showOnlineStatus !== false && person.onlineStatus === 'online';
                         const existingDm = chats.find(
                           (c) =>
                             c.participantIds.length === 2 &&
                             c.participantIds.includes(publicProfile.uid) &&
                             c.participantIds.includes(person.uid)
                         );
+                        const canSeePres = canSeePeerPresence(person, Boolean(existingDm));
+                        const online =
+                          canSeePres && person.onlineStatus === 'online';
                         const isBusy = startingSearchUid === person.uid;
                         return (
                           <div
@@ -3140,7 +3574,7 @@ export default function App() {
                                 name={person.displayName}
                                 photoUrl={person.photoUrl}
                                 size="md"
-                                isOnline={online}
+                                isOnline={canSeePres ? online : undefined}
                                 ringColorClass="ring-white dark:ring-slate-950"
                               />
                               <div className="flex-1 min-w-0">
@@ -3153,7 +3587,9 @@ export default function App() {
                                   )}
                                 </div>
                                 <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                                  {person.maskedEmail || person.bio || t(lang, 'noBioYet')}
+                                  {(person.showGmail !== false && person.maskedEmail) ||
+                                    person.bio ||
+                                    t(lang, 'noBioYet')}
                                 </p>
                               </div>
                             </button>
@@ -3212,7 +3648,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
-              setProfileModalTab('settings');
+              setProfileModalTab('profile');
               setProfileModalOpen(true);
             }}
             aria-label="Settings"
@@ -3222,9 +3658,13 @@ export default function App() {
           </button>
         </div>
 
-        {/* Bottom Action Dock: Keep Chats & New Chat on Left Side (Right stays clear of Netlify badge) */}
-        <div className="shrink-0 bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800">
-          <nav className="h-16 w-[52%] md:w-full grid grid-cols-2 items-center">
+        {/* Bottom Action Dock: Keep Chats & New Chat on Left Side when floating badge exists */}
+        <div className="shrink-0 bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 chat-dock-container">
+          <nav
+            className={`h-14 sm:h-16 ${
+              hasNetlifyBadge ? 'w-[54%] md:w-full' : 'w-full'
+            } grid grid-cols-2 items-center`}
+          >
             <button
               type="button"
               onClick={() => setWorkspaceView('hub')}
@@ -3257,7 +3697,7 @@ export default function App() {
       <main
         className={`${
           isMobileDetailActive ? 'flex' : 'hidden md:flex'
-        } flex-1 flex-col h-full bg-slate-50 dark:bg-slate-950 overflow-hidden`}
+        } flex-1 min-w-0 min-h-0 flex-col h-full bg-slate-50 dark:bg-slate-950 overflow-hidden`}
       >
         <AnimatePresence mode="wait">
         {workspaceView === 'bluetooth' ? (
@@ -3267,15 +3707,19 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-            className="flex-1 flex flex-col h-full overflow-hidden"
+            className="flex-1 min-h-0 min-w-0 flex flex-col h-full overflow-hidden"
           >
             <BluetoothNearbyPanel
               lang={lang}
               currentUser={publicProfile}
               initialMode={btInitialMode}
               initialNearbyCode={deepNearbyCode}
+              initialOfflineCode={deepOfflineCode}
               onRequireAuth={handleGoogleSignIn}
-              onClose={() => setWorkspaceView('hub')}
+              onClose={() => {
+                setDeepOfflineCode('');
+                setWorkspaceView('hub');
+              }}
             />
           </motion.div>
         ) : workspaceView === 'gemini' ? (
@@ -3285,7 +3729,7 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-            className="flex-1 flex flex-col h-full overflow-hidden"
+            className="flex-1 min-h-0 min-w-0 flex flex-col h-full overflow-hidden"
           >
             <GeminiChatPanel
               lang={lang}
@@ -3315,7 +3759,7 @@ export default function App() {
               const file = e.dataTransfer.files?.[0];
               if (file) void handleAttachmentPicked(file);
             }}
-            className="relative flex-1 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden"
+            className="relative flex-1 min-h-0 min-w-0 flex flex-col h-full bg-white dark:bg-slate-950 overflow-hidden"
           >
             {/* Drag & Drop File Overlay */}
             <AnimatePresence>
@@ -3342,8 +3786,9 @@ export default function App() {
               const isActivePeerBlocked = Boolean(
                 activePeerUid && privateInfo.blockedUids?.includes(activePeerUid)
               );
-              const activePeerOnline = isPeerOnline(activePeer, nowTick);
-              const activePresenceText = formatPresenceLabel(activePeer, lang, nowTick);
+              const canSeeActivePres = canSeePeerPresence(activePeer, true);
+              const activePeerOnline = isPeerOnline(activePeer, nowTick, true);
+              const activePresenceText = formatPresenceLabel(activePeer, lang, nowTick, true);
               const canCallPeer = activeChat.participantIds.length >= 2 && !isActivePeerBlocked;
               return (
                 <header className="px-2.5 sm:px-6 py-2.5 sm:py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between gap-1.5 sm:gap-2 shrink-0">
@@ -3370,7 +3815,7 @@ export default function App() {
                         name={getChatDisplayName(activeChat)}
                         photoUrl={activePeer?.photoUrl}
                         size="md"
-                        isOnline={activePeerOnline}
+                        isOnline={canSeeActivePres ? activePeerOnline : undefined}
                         presenceTitle={activePresenceText}
                         ringColorClass="ring-white dark:ring-slate-950"
                       />
@@ -3408,7 +3853,9 @@ export default function App() {
                                   className={
                                     activePeerOnline
                                       ? 'text-emerald-600 dark:text-emerald-400 font-medium shrink-0'
-                                      : 'text-red-500 dark:text-red-400 font-medium shrink-0'
+                                      : canSeeActivePres
+                                      ? 'text-red-500 dark:text-red-400 font-medium shrink-0'
+                                      : 'text-slate-400 dark:text-slate-500 font-medium shrink-0'
                                   }
                                 >
                                   {activePresenceText}
@@ -3430,10 +3877,14 @@ export default function App() {
                                 channel: activeChat.channel,
                                 peerMaskedEmail: activePeer?.maskedEmail,
                                 peerEmail:
-                                  peerEmailsByChat[activeChat.id] ||
-                                  pendingEmailsByChat[activeChat.id] ||
-                                  '',
+                                  activePeer?.showGmail === false
+                                    ? ''
+                                    : peerEmailsByChat[activeChat.id] ||
+                                      pendingEmailsByChat[activeChat.id] ||
+                                      '',
+                                peerShowGmail: activePeer?.showGmail,
                                 viewerEmail: privateInfo?.email || firebaseUser?.email || '',
+                                lang,
                               })}
                             </span>
                             {activeChat.participantIds.length === 1 && activeChat.inviteCode && (
@@ -3492,8 +3943,8 @@ export default function App() {
                                 activeChat.lastMessageText ||
                                 messages[messages.length - 1]?.text ||
                                 (lang === 'bn'
-                                  ? 'KothaLink-এ আপনাকে মেসেজ করেছেন'
-                                  : 'Sent you a message on KothaLink');
+                                  ? 'LoopLy-এ আপনাকে মেসেজ করেছেন'
+                                  : 'Sent you a message on LoopLy');
                               setOfflineEmailPrompt({
                                 chatId: activeChat.id,
                                 peerName: getChatDisplayName(activeChat),
@@ -3554,107 +4005,12 @@ export default function App() {
               </div>
             )}
 
-            {/* Top In-Conversation Keyword Search & Highlight Bar */}
-            <div className="px-2.5 sm:px-6 py-2 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center gap-1.5 sm:gap-2 shrink-0">
-              <div className="relative flex-1 min-w-0 flex items-center">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none" />
-                <input
-                  ref={chatSearchInputRef}
-                  type="text"
-                  value={chatSearchQuery}
-                  onChange={(e) => {
-                    setChatSearchQuery(e.target.value);
-                    setChatSearchMatchIdx(0);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') {
-                      setChatSearchQuery('');
-                      setChatSearchMatchIdx(0);
-                    } else if (e.key === 'Enter' && matchingMessageIds.length > 0) {
-                      e.preventDefault();
-                      setChatSearchMatchIdx((prev) =>
-                        e.shiftKey
-                          ? (prev - 1 + matchingMessageIds.length) % matchingMessageIds.length
-                          : (prev + 1) % matchingMessageIds.length
-                      );
-                    }
-                  }}
-                  placeholder={t(lang, 'chatSearchPlaceholder')}
-                  aria-label={t(lang, 'chatSearchPlaceholder')}
-                  className="w-full min-h-[36px] pl-8 pr-8 rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent focus:border-blue-500 dark:focus:border-blue-500 text-xs sm:text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none transition-colors"
-                />
-                {chatSearchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setChatSearchQuery('');
-                      setChatSearchMatchIdx(0);
-                    }}
-                    aria-label={t(lang, 'chatSearchClear')}
-                    title={t(lang, 'chatSearchClear')}
-                    className="absolute right-1.5 w-6 h-6 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 flex items-center justify-center transition-colors"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-
-              {trimmedChatSearch && (
-                <div className="flex items-center gap-1 shrink-0">
-                  <span className="px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-900 text-[11px] font-mono-tabular font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                    {matchingMessageIds.length > 0
-                      ? `${Math.min(chatSearchMatchIdx + 1, matchingMessageIds.length)}/${matchingMessageIds.length}`
-                      : `0 ${t(lang, 'chatSearchMatchesLabel')}`}
-                  </span>
-
-                  {matchingMessageIds.length > 1 && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setChatSearchMatchIdx(
-                            (prev) => (prev - 1 + matchingMessageIds.length) % matchingMessageIds.length
-                          )
-                        }
-                        aria-label="Previous match"
-                        className="min-h-[34px] min-w-[30px] rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center justify-center transition-colors"
-                      >
-                        <ChevronUp className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setChatSearchMatchIdx((prev) => (prev + 1) % matchingMessageIds.length)
-                        }
-                        aria-label="Next match"
-                        className="min-h-[34px] min-w-[30px] rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center justify-center transition-colors"
-                      >
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      </button>
-                    </>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => setChatSearchFilterOnly((v) => !v)}
-                    className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap ${
-                      chatSearchFilterOnly
-                        ? 'bg-blue-600 text-white shadow-xs'
-                        : 'border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    {chatSearchFilterOnly ? t(lang, 'chatSearchFilterOnly') : t(lang, 'chatSearchShowAll')}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Message Feed + Floating New Message Button */}
+            {/* Message Feed + Scroll Up/Down Arrows & New Message Button */}
             <div className="relative flex-1 flex flex-col overflow-hidden min-h-0">
               <div
-                ref={feedScrollRef}
+                ref={setFeedScrollNode}
                 onScroll={handleFeedScroll}
-                className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-3 bg-slate-50/50 dark:bg-slate-950"
+                className="flex-1 overflow-y-auto px-4 sm:px-6 pr-14 sm:pr-16 py-5 space-y-3 bg-slate-50/50 dark:bg-slate-950"
               >
                 {renderedMessages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-4">
@@ -3679,29 +4035,8 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                ) : displayedMessages.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-3">
-                    <div className="w-10 h-10 rounded-2xl bg-slate-200/70 dark:bg-slate-800 text-slate-500 dark:text-slate-400 flex items-center justify-center">
-                      <Search className="w-5 h-5" />
-                    </div>
-                    <p className="text-sm text-slate-600 dark:text-slate-300 font-medium">
-                      {t(lang, 'chatSearchNoMatches')}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setChatSearchQuery('');
-                        setChatSearchMatchIdx(0);
-                      }}
-                      className="min-h-[36px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
-                    >
-                      {t(lang, 'chatSearchClear')}
-                    </button>
-                  </div>
                 ) : (
-                  displayedMessages.map((msg) => {
-                    const realIdx = renderedMessageIndexMap.get(msg.id) ?? -1;
-                    return (
+                  renderedMessages.map((msg, realIdx) => (
                     <MessageBubble
                       key={msg.id}
                       id={msg.id}
@@ -3721,8 +4056,6 @@ export default function App() {
                       optimistic={msg.optimistic}
                       justSent={justSentIds.has(msg.id)}
                       justArrived={justArrivedIds.has(msg.id)}
-                      searchQuery={trimmedChatSearch}
-                      isActiveSearchMatch={Boolean(trimmedChatSearch && activeSearchMatchId === msg.id)}
                       reactions={reactionsByMessage.get(msg.id) || []}
                       onReact={(emoji) =>
                         void toggleMessageReaction({
@@ -3740,6 +4073,12 @@ export default function App() {
                         }
                       }}
                       onShowInfo={() => setMessageInfoTarget(msg)}
+                      onBeforeDeleteSand={(rect, isSelf) =>
+                        sandDissolveRef.current?.triggerBurst(rect, {
+                          isMe: isSelf,
+                          isDark: themeMode === 'dark',
+                        })
+                      }
                       onDelete={() =>
                         deleteChatMessage({
                           chat: activeChat,
@@ -3754,8 +4093,7 @@ export default function App() {
                         resolveChunkedAttachment(activeChat.id, msgId, marker)
                       }
                     />
-                    );
-                  })
+                  ))
                 )}
 
                 {/* Real-time Animated Peer Typing Indicator */}
@@ -3800,6 +4138,30 @@ export default function App() {
 
                 <div ref={messagesEndRef} />
               </div>
+
+              {/* Jump-to-Top & Jump-to-Bottom Scroll Arrow Controls */}
+              {renderedMessages.length > 0 && (
+                <div className="absolute bottom-3 right-3 z-20 flex flex-col gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => scrollFeedToTop(true)}
+                    aria-label={t(lang, 'scrollToTopLabel')}
+                    title={t(lang, 'scrollToTopLabel')}
+                    className="w-9 h-9 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400 shadow-md flex items-center justify-center transition-colors"
+                  >
+                    <ArrowUp className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => scrollFeedToBottom(true)}
+                    aria-label={t(lang, 'scrollToBottomLabel')}
+                    title={t(lang, 'scrollToBottomLabel')}
+                    className="w-9 h-9 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400 shadow-md flex items-center justify-center transition-colors"
+                  >
+                    <ArrowDown className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
 
               {/* Floating 'New Message' Action Button when user is scrolled up */}
               <AnimatePresence>
@@ -4140,46 +4502,95 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Row 2: Photo, Emoji & File tucked neatly into the left space beside the bottom-right Netlify badge */}
-                <div
-                  className={`flex items-center gap-1.5 justify-start overflow-x-auto no-scrollbar min-h-[42px] ${
-                    hasNetlifyBadge ? 'pr-[186px] sm:pr-[206px]' : ''
-                  }`}
-                >
-                  <motion.button
-                    type="button"
-                    whileTap={{ scale: 0.92 }}
-                    onClick={() => imageInputRef.current?.click()}
-                    title={t(lang, 'uploadImage')}
-                    aria-label={t(lang, 'uploadImage')}
-                    className="min-h-[36px] px-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800 flex items-center gap-1 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <ImagePlus className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                    <span>{t(lang, 'photoBtn')}</span>
-                  </motion.button>
-                  <motion.button
-                    type="button"
-                    whileTap={{ scale: 0.92 }}
-                    onClick={() => setShowEmojiPicker((v) => !v)}
-                    aria-label="Toggle emojis"
-                    className={`min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl transition-colors shrink-0 ${
-                      showEmojiPicker
-                        ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
-                        : 'bg-slate-100 dark:bg-slate-900 border border-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800'
+                {/* Row 2: Photo (Files vs Live Camera Menu), Emoji & File tucked neatly into the left space */}
+                <div ref={photoMenuRef} className="relative">
+                  <AnimatePresence>
+                    {photoMenuOpen && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 6, scale: 0.96 }}
+                        transition={{ duration: 0.14 }}
+                        className="absolute bottom-full left-0 mb-2 z-40 w-64 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-1.5 space-y-1"
+                      >
+                        <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                          {t(lang, 'photoSourceTitle')}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPhotoMenuOpen(false);
+                            imageInputRef.current?.click();
+                          }}
+                          className="w-full min-h-[42px] px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-left flex items-center gap-2.5 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors"
+                        >
+                          <span className="w-8 h-8 rounded-lg bg-blue-600/12 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                            <ImagePlus className="w-4 h-4" />
+                          </span>
+                          <span className="truncate">{t(lang, 'chooseFromFiles')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPhotoMenuOpen(false);
+                            setChatCameraOpen(true);
+                          }}
+                          className="w-full min-h-[42px] px-3 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-left flex items-center gap-2.5 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors"
+                        >
+                          <span className="w-8 h-8 rounded-lg bg-emerald-600/12 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                            <Camera className="w-4 h-4" />
+                          </span>
+                          <span className="truncate">{t(lang, 'takePhotoNow')}</span>
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <div
+                    className={`flex items-center gap-1.5 justify-start overflow-x-auto no-scrollbar min-h-[42px] ${
+                      hasNetlifyBadge ? 'pr-[186px] sm:pr-[206px]' : ''
                     }`}
                   >
-                    <Smile className="w-4 h-4" />
-                  </motion.button>
-                  <motion.button
-                    type="button"
-                    whileTap={{ scale: 0.92 }}
-                    onClick={() => fileInputRef.current?.click()}
-                    title={t(lang, 'uploadFile')}
-                    aria-label={t(lang, 'uploadFile')}
-                    className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent text-emerald-600 dark:text-emerald-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors shrink-0"
-                  >
-                    <Paperclip className="w-4 h-4 shrink-0" />
-                  </motion.button>
+                    <motion.button
+                      type="button"
+                      whileTap={{ scale: 0.92 }}
+                      onClick={() => setPhotoMenuOpen((v) => !v)}
+                      title={t(lang, 'photoSourceTitle')}
+                      aria-label={t(lang, 'photoSourceTitle')}
+                      aria-expanded={photoMenuOpen}
+                      className={`min-h-[36px] px-2.5 rounded-xl border flex items-center gap-1 text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                        photoMenuOpen
+                          ? 'bg-blue-600 border-blue-600 text-white'
+                          : 'bg-slate-100 dark:bg-slate-900 border-transparent text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <ImagePlus className={`w-3.5 h-3.5 shrink-0 ${photoMenuOpen ? 'text-white' : 'text-blue-600 dark:text-blue-400'}`} />
+                      <span>{t(lang, 'photoBtn')}</span>
+                    </motion.button>
+                    <motion.button
+                      type="button"
+                      whileTap={{ scale: 0.92 }}
+                      onClick={() => setShowEmojiPicker((v) => !v)}
+                      aria-label="Toggle emojis"
+                      className={`min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl transition-colors shrink-0 ${
+                        showEmojiPicker
+                          ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800'
+                          : 'bg-slate-100 dark:bg-slate-900 border border-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <Smile className="w-4 h-4" />
+                    </motion.button>
+                    <motion.button
+                      type="button"
+                      whileTap={{ scale: 0.92 }}
+                      onClick={() => fileInputRef.current?.click()}
+                      title={t(lang, 'uploadFile')}
+                      aria-label={t(lang, 'uploadFile')}
+                      className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-900 border border-transparent text-emerald-600 dark:text-emerald-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors shrink-0"
+                    >
+                      <Paperclip className="w-4 h-4 shrink-0" />
+                    </motion.button>
+                  </div>
                 </div>
               </form>
                 );
@@ -4187,18 +4598,18 @@ export default function App() {
             </div>
           </motion.div>
         ) : (
-          /* Desktop Quick Connect Hub */
+          /* Desktop & Tablet Quick Connect Hub */
           <motion.div
             key="view-hub"
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-            className="flex-1 overflow-y-auto p-8 lg:p-12 flex items-center justify-center"
+            className="flex-1 min-h-0 min-w-0 h-full overflow-y-auto p-5 sm:p-6 lg:p-10 flex flex-col"
           >
-            <div className="max-w-4xl w-full space-y-8">
+            <div className="max-w-4xl w-full mx-auto my-auto space-y-6 sm:space-y-8">
               <div className="space-y-2">
-                <h1 className="font-display text-3xl font-bold text-slate-900 dark:text-white text-balance">
+                <h1 className="font-display text-2xl sm:text-3xl font-bold text-slate-900 dark:text-white text-balance">
                   {t(lang, 'hubTitle')}
                 </h1>
                 <p className="text-sm text-slate-600 dark:text-slate-400 max-w-2xl">
@@ -4206,14 +4617,14 @@ export default function App() {
                 </p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-5">
                 {/* Gmail Card */}
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
                   transition={{ duration: 0.18, delay: 0.02, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 flex flex-col justify-between space-y-5 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center">
@@ -4233,7 +4644,7 @@ export default function App() {
                       setConnectModalTab('gmail');
                       setConnectModalOpen(true);
                     }}
-                    className="w-full min-h-[44px] px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium transition-colors whitespace-nowrap"
+                    className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium transition-colors text-center leading-snug"
                   >
                     {t(lang, 'cardGmailAction')}
                   </motion.button>
@@ -4245,7 +4656,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
                   transition={{ duration: 0.18, delay: 0.05, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 flex flex-col justify-between space-y-5 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-emerald-600/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
@@ -4265,7 +4676,7 @@ export default function App() {
                       setConnectModalTab('invite');
                       setConnectModalOpen(true);
                     }}
-                    className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 dark:bg-slate-100 hover:bg-slate-800 dark:hover:bg-white text-white dark:text-slate-900 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-slate-900 dark:bg-slate-100 hover:bg-slate-800 dark:hover:bg-white text-white dark:text-slate-900 text-xs font-medium transition-colors text-center leading-snug"
                   >
                     {t(lang, 'cardCodeAction')}
                   </motion.button>
@@ -4277,7 +4688,7 @@ export default function App() {
                   animate={{ opacity: 1, y: 0 }}
                   whileHover={{ y: -3 }}
                   transition={{ duration: 0.18, delay: 0.08, ease: [0.16, 1, 0.3, 1] }}
-                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xs"
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 flex flex-col justify-between space-y-5 shadow-xs"
                 >
                   <div className="space-y-3">
                     <div className="w-11 h-11 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center justify-center">
@@ -4297,7 +4708,7 @@ export default function App() {
                       setBtInitialMode('bluetooth');
                       setWorkspaceView('bluetooth');
                     }}
-                    className="w-full min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap"
+                    className="w-full min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors text-center leading-snug"
                   >
                     {t(lang, 'cardBtAction')}
                   </motion.button>
@@ -4447,15 +4858,15 @@ export default function App() {
               </div>
               <div className="p-5 flex flex-col items-center text-center space-y-4">
                 {(() => {
-                  const isOnline =
-                    previewedUser.showOnlineStatus !== false &&
-                    previewedUser.onlineStatus === 'online';
                   const existingDm = chats.find(
                     (c) =>
                       c.participantIds.length === 2 &&
                       c.participantIds.includes(publicProfile.uid) &&
                       c.participantIds.includes(previewedUser.uid)
                   );
+                  const canSeePres = canSeePeerPresence(previewedUser, Boolean(existingDm));
+                  const isOnline =
+                    canSeePres && previewedUser.onlineStatus === 'online';
                   const isBusy = startingSearchUid === previewedUser.uid;
                   return (
                     <>
@@ -4463,7 +4874,7 @@ export default function App() {
                         name={previewedUser.displayName}
                         photoUrl={previewedUser.photoUrl}
                         size="xl"
-                        isOnline={isOnline}
+                        isOnline={canSeePres ? isOnline : undefined}
                         ringColorClass="ring-white dark:ring-slate-900"
                       />
                       <div className="space-y-1">
@@ -4471,14 +4882,18 @@ export default function App() {
                           {previewedUser.displayName}
                         </h4>
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                          {isOnline ? (
-                            <span className="text-emerald-600 dark:text-emerald-400">
-                              ● {t(lang, 'online')}
-                            </span>
+                          {canSeePres ? (
+                            isOnline ? (
+                              <span className="text-emerald-600 dark:text-emerald-400">
+                                ● {t(lang, 'online')}
+                              </span>
+                            ) : (
+                              <span>{t(lang, 'offline')}</span>
+                            )
                           ) : (
-                            <span>{t(lang, 'offline')}</span>
+                            <span>{t(lang, 'presenceHidden')}</span>
                           )}
-                          {previewedUser.maskedEmail ? (
+                          {previewedUser.showGmail !== false && previewedUser.maskedEmail ? (
                             <>
                               <span className="mx-1.5" aria-hidden="true">·</span>
                               <span className="font-mono-tabular">{previewedUser.maskedEmail}</span>
@@ -4545,6 +4960,9 @@ export default function App() {
                         ...prev,
                         displayName: updates.displayName,
                         bio: updates.bio,
+                        photoUrl: updates.photoUrl,
+                        showGmail: updates.showGmail,
+                        onlineVisibility: updates.onlineVisibility,
                         showOnlineStatus: updates.showOnlineStatus,
                         searchable: updates.searchable,
                       }
@@ -4562,11 +4980,16 @@ export default function App() {
                 setLang(updates.language);
               }}
               onChangeTheme={(mode) => handleSelectThemeMode(mode)}
+              onChangeLanguage={(nextLang) => setLang(nextLang)}
               onToggleSound={toggleSound}
               onRequestBgNotifications={() => void handleRequestBgNotifications()}
               onToggleEnterToSend={toggleEnterToSend}
               onUnblockUser={(uid) => handleToggleBlockUid(uid, false)}
               onOpenLegalModal={(tab) => setLegalModalState({ open: true, tab })}
+              onOpenInviteModal={() => {
+                setConnectModalTab('invite');
+                setConnectModalOpen(true);
+              }}
               onExportData={handleExportMyData}
               onLockAppNow={() => setAppLocked(true)}
               onAppLockChanged={() => setAppLockVersion((v) => v + 1)}
@@ -4583,7 +5006,7 @@ export default function App() {
           const activePeer = getChatPeerProfile(activeChat);
           const peerUid = activeChat.participantIds.find((id) => id !== publicProfile.uid);
           const peerStatuses = peerUid ? statuses.filter((s) => s.uid === peerUid) : [];
-          const peerOnline = isPeerOnline(activePeer, nowTick);
+          const peerOnline = isPeerOnline(activePeer, nowTick, true);
           const peerIsBlocked = Boolean(peerUid && privateInfo.blockedUids?.includes(peerUid));
           return (
             <motion.div
@@ -4601,13 +5024,17 @@ export default function App() {
                 displayName={getChatDisplayName(activeChat)}
                 peerProfile={activePeer}
                 isOnline={peerOnline}
-                presenceLabel={formatPresenceLabel(activePeer, lang, nowTick)}
+                presenceLabel={formatPresenceLabel(activePeer, lang, nowTick, true)}
                 peerStatuses={peerStatuses}
                 isChatMuted={mutedChatIds.includes(activeChat.id)}
                 isChatSoundMuted={mutedSoundChatIds.includes(activeChat.id)}
                 isPinned={pinnedOrderMap.has(activeChat.id)}
                 isBlocked={peerIsBlocked}
-                savedPeerEmail={peerEmailsByChat[activeChat.id] || pendingEmailsByChat[activeChat.id] || ''}
+                savedPeerEmail={
+                  activePeer?.showGmail === false
+                    ? ''
+                    : peerEmailsByChat[activeChat.id] || pendingEmailsByChat[activeChat.id] || ''
+                }
                 viewerEmail={privateInfo?.email || firebaseUser?.email || ''}
                 autoOfferOfflineGmail={!offlineAlertOptOutChats.includes(activeChat.id)}
                 officialMailerReady={officialMailerReady}
@@ -4658,7 +5085,7 @@ export default function App() {
                     to: toEmail,
                     senderName: publicProfile.displayName,
                     senderEmail: privateInfo.email,
-                    messagePreview: activeChat.lastMessageText || 'Sent you a message on KothaLink',
+                    messagePreview: activeChat.lastMessageText || 'Sent you a message on LoopLy',
                     appUrl: `${getPublicAppOrigin()}/?chat=${encodeURIComponent(activeChat.id)}`,
                     isBangla: lang === 'bn',
                   });
@@ -4667,7 +5094,7 @@ export default function App() {
                   buildGmailWebComposeUrl({
                     to: toEmail,
                     senderName: publicProfile.displayName,
-                    messagePreview: activeChat.lastMessageText || 'Sent you a message on KothaLink',
+                    messagePreview: activeChat.lastMessageText || 'Sent you a message on LoopLy',
                     appUrl: `${getPublicAppOrigin()}/?chat=${encodeURIComponent(activeChat.id)}`,
                     isBangla: lang === 'bn',
                   })
@@ -4748,6 +5175,7 @@ export default function App() {
               mode="view"
               lang={lang}
               currentUser={publicProfile}
+              peerProfiles={peerProfiles}
               statuses={statusViewer.statuses}
               initialIndex={statusViewer.initialIndex}
               authorOnline={statusViewer.authorOnline}
@@ -4756,6 +5184,17 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      <CameraCaptureModal
+        isOpen={chatCameraOpen}
+        mode="chat"
+        lang={lang}
+        onCaptureFile={async (file) => {
+          const prepared = await prepareAttachment(file);
+          await handleSendMessage(undefined, '', prepared);
+        }}
+        onClose={() => setChatCameraOpen(false)}
+      />
 
       {/* Smooth Image Lightbox Preview */}
       <AnimatePresence>
@@ -5210,6 +5649,7 @@ export default function App() {
         onAcceptPolicy={publicProfile ? handleAcceptPolicy : undefined}
         onClose={() => setLegalModalState((prev) => ({ ...prev, open: false }))}
       />
+      <SandDissolveOverlay ref={sandDissolveRef} />
       <LaunchSplash
         visible={showLaunchSplash}
         onDismiss={() => setSplashDismissed(true)}

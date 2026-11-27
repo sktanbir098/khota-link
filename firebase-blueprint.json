@@ -18,7 +18,7 @@
         },
         "photoUrl": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "bio": {
           "type": "string",
@@ -31,8 +31,15 @@
         "hasPhone": {
           "type": "boolean"
         },
+        "showGmail": {
+          "type": "boolean"
+        },
         "showOnlineStatus": {
           "type": "boolean"
+        },
+        "onlineVisibility": {
+          "type": "string",
+          "enum": ["everyone", "contacts", "nobody"]
         },
         "searchable": {
           "type": "boolean"
@@ -78,7 +85,7 @@
         },
         "language": {
           "type": "string",
-          "enum": ["en", "bn"]
+          "enum": ["en", "bn", "hi", "ar", "es", "fr", "de", "pt", "zh", "ja", "ko", "ru", "tr", "id", "ur", "it", "th", "vi"]
         },
         "pinnedChatIds": {
           "type": "array",
@@ -125,7 +132,7 @@
         },
         "photoUrl": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "updatedAt": {
           "type": "string",
@@ -158,7 +165,7 @@
         },
         "photoUrl": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "bio": {
           "type": "string",
@@ -584,7 +591,7 @@
         },
         "photoUrl": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "mediaType": {
           "type": "string",
@@ -637,7 +644,7 @@
         },
         "photoUrl": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "emoji": {
           "type": "string",
@@ -680,7 +687,7 @@
         },
         "photoUrl": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "text": {
           "type": "string",
@@ -724,7 +731,7 @@
         },
         "callerPhoto": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "calleeUid": {
           "type": "string",
@@ -739,7 +746,7 @@
         },
         "calleePhoto": {
           "type": "string",
-          "maxLength": 500
+          "maxLength": 32000
         },
         "participantIds": {
           "type": "array"

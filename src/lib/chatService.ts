@@ -20,6 +20,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { splitDataUrlIntoChunks } from './attachments';
+import { normalizeAppLanguage } from './i18n';
 import {
   AppLanguage,
   ChatChannel,
@@ -31,6 +32,7 @@ import {
   LIMITS,
   MessageReaction,
   MessageTransport,
+  OnlineVisibility,
   PendingDelivery,
   PreparedAttachment,
   ReactionEmoji,
@@ -97,21 +99,117 @@ function makeRandomCode(length = 6): string {
   return out;
 }
 
+const OFFLINE_PROFILE_CACHE_PREFIX = 'kl_cached_profile_v1_';
+
+function readCachedUserProfile(uid: string): {
+  publicProfile: UserPublicProfile;
+  privateInfo: UserPrivateInfo;
+} | null {
+  if (typeof window === 'undefined' || !uid) return null;
+  try {
+    const raw = localStorage.getItem(`${OFFLINE_PROFILE_CACHE_PREFIX}${uid}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      publicProfile?: UserPublicProfile;
+      privateInfo?: UserPrivateInfo;
+    };
+    if (parsed?.publicProfile?.uid === uid && parsed?.privateInfo?.uid === uid) {
+      return {
+        publicProfile: parsed.publicProfile,
+        privateInfo: parsed.privateInfo,
+      };
+    }
+  } catch {
+    // Ignore storage read failure
+  }
+  return null;
+}
+
+function writeCachedUserProfile(
+  uid: string,
+  publicProfile: UserPublicProfile,
+  privateInfo: UserPrivateInfo
+): void {
+  if (typeof window === 'undefined' || !uid) return;
+  try {
+    localStorage.setItem(
+      `${OFFLINE_PROFILE_CACHE_PREFIX}${uid}`,
+      JSON.stringify({ publicProfile, privateInfo })
+    );
+  } catch {
+    // Ignore quota failure
+  }
+}
+
+function isOfflineNetworkError(err: unknown): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  const code = (err as { code?: string })?.code || '';
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    code === 'unavailable' ||
+    msg.includes('client is offline') ||
+    msg.includes('failed to get document because the client is offline') ||
+    msg.includes('network')
+  );
+}
+
 export async function ensureUserProfile(user: User): Promise<{
   publicProfile: UserPublicProfile;
   privateInfo: UserPrivateInfo;
 }> {
-  const userRef = doc(db, 'users', user.uid);
-  const privateRef = doc(db, 'users', user.uid, 'private', 'info');
-  await user.getIdTokenResult(false).catch(() => null);
-
   const displayName = sanitizeStr(
-    user.displayName || user.email?.split('@')[0] || 'KothaLink User',
+    user.displayName || user.email?.split('@')[0] || 'LoopLy User',
     LIMITS.DISPLAY_NAME_MAX
   );
   const photoUrl = sanitizeStr(user.photoURL || '', LIMITS.PHOTO_URL_MAX);
   const email = sanitizeStr(normalizeEmail(user.email || ''), LIMITS.EMAIL_MAX);
   const maskedEmail = email ? sanitizeStr(maskEmail(email), LIMITS.EMAIL_MAX) : '';
+
+  const cachedProfile = readCachedUserProfile(user.uid);
+  const buildOfflineFallback = (): {
+    publicProfile: UserPublicProfile;
+    privateInfo: UserPrivateInfo;
+  } => {
+    if (cachedProfile) return cachedProfile;
+    const savedLang = normalizeAppLanguage(
+      typeof window !== 'undefined' ? localStorage.getItem('kl_lang') : null
+    );
+    return {
+      publicProfile: {
+        uid: user.uid,
+        displayName: displayName || 'LoopLy User',
+        photoUrl,
+        bio: 'Available on LoopLy',
+        maskedEmail,
+        showGmail: true,
+        hasPhone: false,
+        showOnlineStatus: true,
+        onlineVisibility: 'everyone',
+        searchable: true,
+        onlineStatus: 'offline',
+        lastSeenAt: null,
+        createdAt: null,
+        updatedAt: null,
+      },
+      privateInfo: {
+        uid: user.uid,
+        email,
+        phoneNumber: '',
+        language: savedLang,
+        readReceiptsEnabled: true,
+        blockedUids: [],
+        updatedAt: null,
+      },
+    };
+  };
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return buildOfflineFallback();
+  }
+
+  const userRef = doc(db, 'users', user.uid);
+  const privateRef = doc(db, 'users', user.uid, 'private', 'info');
+  await user.getIdTokenResult(false).catch(() => null);
 
   let existingPublic: UserPublicProfile | null = null;
   let existingPrivate: UserPrivateInfo | null = null;
@@ -122,6 +220,9 @@ export async function ensureUserProfile(user: User): Promise<{
   ]);
 
   if (pubResult.status === 'rejected') {
+    if (isOfflineNetworkError(pubResult.reason)) {
+      return buildOfflineFallback();
+    }
     handleFirestoreError(pubResult.reason, OperationType.GET, `users/${user.uid}`);
   }
   if (pubResult.value.exists()) {
@@ -136,7 +237,7 @@ export async function ensureUserProfile(user: User): Promise<{
   }
 
   const batch = writeBatch(db);
-  const safeDisplayName = displayName || 'KothaLink User';
+  const safeDisplayName = displayName || 'LoopLy User';
   let needsFreshRead = false;
 
   if (!existingPublic) {
@@ -145,10 +246,12 @@ export async function ensureUserProfile(user: User): Promise<{
       uid: user.uid,
       displayName: safeDisplayName,
       photoUrl,
-      bio: 'Available on KothaLink',
+      bio: 'Available on LoopLy',
       ...(maskedEmail ? { maskedEmail } : {}),
+      showGmail: true,
       hasPhone: false,
       showOnlineStatus: true,
+      onlineVisibility: 'everyone',
       searchable: true,
       onlineStatus: 'online',
       lastSeenAt: serverTimestamp(),
@@ -168,11 +271,21 @@ export async function ensureUserProfile(user: User): Promise<{
     if (typeof existingPublic.photoUrl !== 'string' || existingPublic.photoUrl.length > LIMITS.PHOTO_URL_MAX) {
       pubUpdates.photoUrl = photoUrl;
     }
-    if (typeof existingPublic.bio !== 'string' || existingPublic.bio.length > LIMITS.BIO_MAX) {
-      pubUpdates.bio = sanitizeStr(String(existingPublic.bio || 'Available on KothaLink'), LIMITS.BIO_MAX);
+    const rawBio = typeof existingPublic.bio === 'string' ? existingPublic.bio.trim() : '';
+    if (!rawBio || rawBio === 'Available on KothaLink' || existingPublic.bio.length > LIMITS.BIO_MAX) {
+      pubUpdates.bio = sanitizeStr(
+        !rawBio || rawBio === 'Available on KothaLink' ? 'Available on LoopLy' : existingPublic.bio,
+        LIMITS.BIO_MAX
+      );
     }
-    if (maskedEmail && existingPublic.maskedEmail !== maskedEmail) {
+    const wantsGmailShown = existingPublic.showGmail !== false;
+    if (typeof existingPublic.showGmail !== 'boolean') {
+      pubUpdates.showGmail = true;
+    }
+    if (wantsGmailShown && maskedEmail && existingPublic.maskedEmail !== maskedEmail) {
       pubUpdates.maskedEmail = maskedEmail;
+    } else if (!wantsGmailShown && existingPublic.maskedEmail) {
+      pubUpdates.maskedEmail = '';
     }
     if (typeof existingPublic.hasPhone !== 'boolean') {
       pubUpdates.hasPhone = false;
@@ -180,15 +293,24 @@ export async function ensureUserProfile(user: User): Promise<{
     if (typeof existingPublic.showOnlineStatus !== 'boolean') {
       pubUpdates.showOnlineStatus = true;
     }
+    if (
+      existingPublic.onlineVisibility !== 'everyone' &&
+      existingPublic.onlineVisibility !== 'contacts' &&
+      existingPublic.onlineVisibility !== 'nobody'
+    ) {
+      pubUpdates.onlineVisibility = existingPublic.showOnlineStatus === false ? 'nobody' : 'everyone';
+    }
     batch.update(userRef, pubUpdates);
     existingPublic = {
       ...existingPublic,
       ...(pubUpdates.displayName ? { displayName: String(pubUpdates.displayName) } : {}),
       ...(pubUpdates.photoUrl !== undefined ? { photoUrl: String(pubUpdates.photoUrl) } : {}),
       ...(pubUpdates.bio !== undefined ? { bio: String(pubUpdates.bio) } : {}),
-      ...(pubUpdates.maskedEmail ? { maskedEmail: String(pubUpdates.maskedEmail) } : {}),
+      ...(pubUpdates.maskedEmail !== undefined ? { maskedEmail: String(pubUpdates.maskedEmail) } : {}),
+      ...(typeof pubUpdates.showGmail === 'boolean' ? { showGmail: pubUpdates.showGmail } : {}),
       ...(typeof pubUpdates.hasPhone === 'boolean' ? { hasPhone: pubUpdates.hasPhone } : {}),
       ...(typeof pubUpdates.showOnlineStatus === 'boolean' ? { showOnlineStatus: pubUpdates.showOnlineStatus } : {}),
+      ...(pubUpdates.onlineVisibility ? { onlineVisibility: pubUpdates.onlineVisibility as OnlineVisibility } : {}),
       onlineStatus: 'online',
     };
   }
@@ -216,8 +338,9 @@ export async function ensureUserProfile(user: User): Promise<{
         privUpdates.phoneNumber = '';
       }
     }
-    if (existingPrivate.language !== 'en' && existingPrivate.language !== 'bn') {
-      privUpdates.language = 'en';
+    const normalizedLang = normalizeAppLanguage(existingPrivate.language);
+    if (existingPrivate.language !== normalizedLang) {
+      privUpdates.language = normalizedLang;
     }
     if (Object.keys(privUpdates).length > 0) {
       privUpdates.updatedAt = serverTimestamp();
@@ -242,9 +365,9 @@ export async function ensureUserProfile(user: User): Promise<{
           await deleteDoc(userRef).catch(() => null);
           await setDoc(userRef, {
             uid: user.uid,
-            displayName: sanitizeStr(existingPublic.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User',
+            displayName: sanitizeStr(existingPublic.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'LoopLy User',
             photoUrl: sanitizeStr(existingPublic.photoUrl || photoUrl, LIMITS.PHOTO_URL_MAX),
-            bio: sanitizeStr(existingPublic.bio || 'Available on KothaLink', LIMITS.BIO_MAX),
+            bio: sanitizeStr(existingPublic.bio || 'Available on LoopLy', LIMITS.BIO_MAX),
             ...(maskedEmail ? { maskedEmail } : {}),
             hasPhone: false,
             showOnlineStatus: typeof existingPublic.showOnlineStatus === 'boolean' ? existingPublic.showOnlineStatus : true,
@@ -272,7 +395,7 @@ export async function ensureUserProfile(user: User): Promise<{
           uid: user.uid,
           email: email || sanitizeStr(existingPrivate?.email || '', LIMITS.EMAIL_MAX),
           phoneNumber: '',
-          language: existingPrivate?.language === 'bn' ? 'bn' : 'en',
+          language: normalizeAppLanguage(existingPrivate?.language),
           readReceiptsEnabled: existingPrivate?.readReceiptsEnabled !== false,
           ...(safeBlocked.length > 0 ? { blockedUids: safeBlocked } : {}),
           ...(safePinned.length > 0 ? { pinnedChatIds: safePinned } : {}),
@@ -288,7 +411,7 @@ export async function ensureUserProfile(user: User): Promise<{
 
   // Register/sync SHA-256 email directory entry in background so sign-in/boot is instant
   if (email) {
-    const dirName = sanitizeStr(existingPublic?.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
+    const dirName = sanitizeStr(existingPublic?.displayName || safeDisplayName, LIMITS.DISPLAY_NAME_MAX) || 'LoopLy User';
     const dirPhoto = sanitizeStr(existingPublic?.photoUrl || photoUrl, LIMITS.PHOTO_URL_MAX);
     void (async () => {
       try {
@@ -338,7 +461,8 @@ export async function ensureUserProfile(user: User): Promise<{
       displayName: resolvedPublic.displayName,
       photoUrl: resolvedPublic.photoUrl,
       bio: resolvedPublic.bio,
-      maskedEmail: resolvedPublic.maskedEmail || maskedEmail,
+      maskedEmail:
+        resolvedPublic.showGmail === false ? '' : resolvedPublic.maskedEmail || maskedEmail,
       email: email || resolvedPrivate?.email || '',
     }).catch((syncErr) => {
       console.warn('Search index sync warning:', syncErr);
@@ -346,6 +470,10 @@ export async function ensureUserProfile(user: User): Promise<{
   }
 
   void warmPublicDirectoryCache();
+
+  if (resolvedPublic && resolvedPrivate) {
+    writeCachedUserProfile(user.uid, resolvedPublic, resolvedPrivate);
+  }
 
   return {
     publicProfile: resolvedPublic,
@@ -384,13 +512,22 @@ export async function updateUserSettings(params: {
   bio: string;
   photoUrl: string;
   language: AppLanguage;
+  showGmail?: boolean;
+  onlineVisibility?: OnlineVisibility;
   showOnlineStatus?: boolean;
   searchable?: boolean;
   readReceiptsEnabled?: boolean;
 }): Promise<void> {
-  const cleanName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
-  const cleanBio = sanitizeStr(params.bio, LIMITS.BIO_MAX);
+  const cleanName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'LoopLy User';
+  const rawBio = sanitizeStr(params.bio, LIMITS.BIO_MAX);
+  const cleanBio = rawBio || 'Available on LoopLy';
   const cleanPhoto = sanitizeStr(params.photoUrl, LIMITS.PHOTO_URL_MAX);
+  const showGmail = params.showGmail !== false;
+  const normalizedEmail = params.email ? normalizeEmail(params.email) : '';
+  const nextMaskedEmail =
+    showGmail && normalizedEmail
+      ? sanitizeStr(maskEmail(normalizedEmail), LIMITS.EMAIL_MAX)
+      : '';
 
   const batch = writeBatch(db);
   const userRef = doc(db, 'users', params.uid);
@@ -399,12 +536,25 @@ export async function updateUserSettings(params: {
   const userUpdates: Record<string, unknown> = {
     displayName: cleanName,
     bio: cleanBio,
+    photoUrl: cleanPhoto,
+    showGmail,
+    maskedEmail: nextMaskedEmail,
     hasPhone: false,
     updatedAt: serverTimestamp(),
   };
-  if (typeof params.showOnlineStatus === 'boolean') {
+
+  if (
+    params.onlineVisibility === 'everyone' ||
+    params.onlineVisibility === 'contacts' ||
+    params.onlineVisibility === 'nobody'
+  ) {
+    userUpdates.onlineVisibility = params.onlineVisibility;
+    userUpdates.showOnlineStatus = params.onlineVisibility !== 'nobody';
+  } else if (typeof params.showOnlineStatus === 'boolean') {
     userUpdates.showOnlineStatus = params.showOnlineStatus;
+    userUpdates.onlineVisibility = params.showOnlineStatus ? 'everyone' : 'nobody';
   }
+
   if (typeof params.searchable === 'boolean') {
     userUpdates.searchable = params.searchable;
   }
@@ -412,7 +562,7 @@ export async function updateUserSettings(params: {
 
   const privUpdates: Record<string, unknown> = {
     phoneNumber: '',
-    language: params.language,
+    language: normalizeAppLanguage(params.language),
     updatedAt: serverTimestamp(),
   };
   if (typeof params.readReceiptsEnabled === 'boolean') {
@@ -420,9 +570,9 @@ export async function updateUserSettings(params: {
   }
   batch.update(privateRef, privUpdates);
 
-  // Update email directory display name if email exists
-  if (params.email) {
-    const emailHash = await sha256Hex(normalizeEmail(params.email));
+  // Update email directory display name and avatar if email exists
+  if (normalizedEmail) {
+    const emailHash = await sha256Hex(normalizedEmail);
     const emailDirRef = doc(db, 'email_directory', emailHash);
     try {
       const snap = await getDoc(emailDirRef);
@@ -444,6 +594,9 @@ export async function updateUserSettings(params: {
     handleFirestoreError(err, OperationType.UPDATE, `users/${params.uid}`);
   }
 
+  liveProfileCache.delete(params.uid);
+  publicDirectoryCache = null;
+
   if (params.searchable === false) {
     void removeUserSearchBuckets(params.uid);
   } else {
@@ -452,8 +605,8 @@ export async function updateUserSettings(params: {
       displayName: cleanName,
       photoUrl: cleanPhoto,
       bio: cleanBio,
-      maskedEmail: params.email ? maskEmail(normalizeEmail(params.email)) : '',
-      email: params.email ? normalizeEmail(params.email) : '',
+      maskedEmail: nextMaskedEmail,
+      email: normalizedEmail,
       force: true,
     }).catch((syncErr) => {
       console.warn('Search index sync warning:', syncErr);
@@ -578,7 +731,7 @@ export function exportMyUserData(params: {
 }): void {
   const payload = {
     exportedAt: new Date().toISOString(),
-    app: 'KothaLink',
+    app: 'LoopLy',
     policyVersion: params.privateInfo.acceptedPolicyVersion || CURRENT_POLICY_VERSION,
     account: {
       uid: params.publicProfile.uid,
@@ -617,7 +770,7 @@ export function exportMyUserData(params: {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `kothalink-my-data-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `looply-my-data-${new Date().toISOString().slice(0, 10)}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -725,7 +878,7 @@ export async function syncUserSearchBuckets(params: {
   force?: boolean;
 }): Promise<void> {
   if (!params.uid || !LIMITS.ID_PATTERN.test(params.uid)) return;
-  const cleanName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'KothaLink User';
+  const cleanName = sanitizeStr(params.displayName, LIMITS.DISPLAY_NAME_MAX) || 'LoopLy User';
   const cleanPhoto = sanitizeStr(params.photoUrl, LIMITS.PHOTO_URL_MAX);
   const cleanBio = sanitizeStr(params.bio, LIMITS.BIO_MAX);
   const cleanMasked = sanitizeStr(params.maskedEmail, LIMITS.EMAIL_MAX);
@@ -997,10 +1150,12 @@ export function getInstantLocalUserMatches(params: {
         displayName: prof.displayName,
         photoUrl: prof.photoUrl || '',
         bio: prof.bio || '',
-        maskedEmail: prof.maskedEmail || '',
+        maskedEmail: prof.showGmail === false ? '' : prof.maskedEmail || '',
+        showGmail: prof.showGmail !== false,
         onlineStatus: prof.onlineStatus,
         lastSeenAt: prof.lastSeenAt,
         showOnlineStatus: prof.showOnlineStatus,
+        onlineVisibility: prof.onlineVisibility,
         score,
       });
     }
@@ -1014,7 +1169,7 @@ export function getInstantLocalUserMatches(params: {
         {
           displayName: prof.displayName,
           bio: prof.bio || '',
-          maskedEmail: prof.maskedEmail || '',
+          maskedEmail: prof.showGmail === false ? '' : prof.maskedEmail || '',
           searchTerms: [prof.displayName],
         },
         fullQueryLower,
@@ -1029,10 +1184,12 @@ export function getInstantLocalUserMatches(params: {
             displayName: prof.displayName,
             photoUrl: prof.photoUrl || '',
             bio: prof.bio || '',
-            maskedEmail: prof.maskedEmail || '',
+            maskedEmail: prof.showGmail === false ? '' : prof.maskedEmail || '',
+            showGmail: prof.showGmail !== false,
             onlineStatus: prof.onlineStatus,
             lastSeenAt: prof.lastSeenAt,
             showOnlineStatus: prof.showOnlineStatus,
+            onlineVisibility: prof.onlineVisibility,
             score,
           });
         }
@@ -1065,15 +1222,18 @@ export function getInstantLocalUserMatches(params: {
           const existing = results.get(entry.uid);
           const liveProf = known[entry.uid] || liveProfileCache.get(entry.uid)?.profile;
           if (!existing || score > existing.score) {
+            const hideGmail = liveProf?.showGmail === false;
             results.set(entry.uid, {
               uid: entry.uid,
               displayName: liveProf?.displayName || entry.displayName,
               photoUrl: liveProf?.photoUrl || entry.photoUrl || '',
               bio: liveProf?.bio || entry.bio || '',
-              maskedEmail: liveProf?.maskedEmail || entry.maskedEmail || '',
+              maskedEmail: hideGmail ? '' : liveProf?.maskedEmail || entry.maskedEmail || '',
+              showGmail: liveProf?.showGmail !== false,
               onlineStatus: liveProf?.onlineStatus,
               lastSeenAt: liveProf?.lastSeenAt,
               showOnlineStatus: liveProf?.showOnlineStatus,
+              onlineVisibility: liveProf?.onlineVisibility,
               score,
             });
           }
@@ -1158,10 +1318,12 @@ export async function searchUserProfiles(params: {
       displayName: emailMatch.displayName,
       photoUrl: emailMatch.photoUrl || '',
       bio: emailMatch.bio || '',
-      maskedEmail: emailMatch.maskedEmail || maskEmail(fullQueryLower),
+      maskedEmail: emailMatch.showGmail === false ? '' : emailMatch.maskedEmail || maskEmail(fullQueryLower),
+      showGmail: emailMatch.showGmail !== false,
       onlineStatus: emailMatch.onlineStatus,
       lastSeenAt: emailMatch.lastSeenAt,
       showOnlineStatus: emailMatch.showOnlineStatus,
+      onlineVisibility: emailMatch.onlineVisibility,
       score: 200,
     });
   }
@@ -1173,7 +1335,7 @@ export async function searchUserProfiles(params: {
       {
         displayName: prof.displayName,
         bio: prof.bio || '',
-        maskedEmail: prof.maskedEmail || '',
+        maskedEmail: prof.showGmail === false ? '' : prof.maskedEmail || '',
         searchTerms: [prof.displayName],
       },
       fullQueryLower,
@@ -1188,10 +1350,12 @@ export async function searchUserProfiles(params: {
           displayName: prof.displayName,
           photoUrl: prof.photoUrl || '',
           bio: prof.bio || '',
-          maskedEmail: prof.maskedEmail || '',
+          maskedEmail: prof.showGmail === false ? '' : prof.maskedEmail || '',
+          showGmail: prof.showGmail !== false,
           onlineStatus: prof.onlineStatus,
           lastSeenAt: prof.lastSeenAt,
           showOnlineStatus: prof.showOnlineStatus,
+          onlineVisibility: prof.onlineVisibility,
           score,
         });
       }
@@ -1207,7 +1371,7 @@ export async function searchUserProfiles(params: {
       {
         displayName: entry.displayName,
         bio: entry.bio || '',
-        maskedEmail: entry.maskedEmail || '',
+        maskedEmail: livePref?.showGmail === false ? '' : entry.maskedEmail || '',
         searchTerms: Array.isArray(entry.searchTerms) ? entry.searchTerms : [],
       },
       fullQueryLower,
@@ -1218,15 +1382,18 @@ export async function searchUserProfiles(params: {
       const existing = merged.get(entry.uid);
       const liveProf = known[entry.uid] || liveProfileCache.get(entry.uid)?.profile;
       if (!existing || score > existing.score) {
+        const hideGmail = liveProf?.showGmail === false;
         merged.set(entry.uid, {
           uid: entry.uid,
           displayName: liveProf?.displayName || entry.displayName,
           photoUrl: liveProf?.photoUrl || entry.photoUrl || '',
           bio: liveProf?.bio || entry.bio || '',
-          maskedEmail: liveProf?.maskedEmail || entry.maskedEmail || '',
+          maskedEmail: hideGmail ? '' : liveProf?.maskedEmail || entry.maskedEmail || '',
+          showGmail: liveProf?.showGmail !== false,
           onlineStatus: liveProf?.onlineStatus,
           lastSeenAt: liveProf?.lastSeenAt,
           showOnlineStatus: liveProf?.showOnlineStatus,
+          onlineVisibility: liveProf?.onlineVisibility,
           score,
         });
       }
@@ -1302,6 +1469,48 @@ export function subscribeUserProfiles(
   return () => {
     unsubs.forEach((u) => u());
   };
+}
+
+export function subscribeOwnUserProfile(
+  uid: string,
+  onProfile: (profile: UserPublicProfile) => void
+): Unsubscribe {
+  if (!uid || !LIMITS.ID_PATTERN.test(uid)) {
+    return () => {};
+  }
+  return onSnapshot(
+    doc(db, 'users', uid),
+    (snap) => {
+      if (snap.exists()) {
+        const prof = snap.data() as UserPublicProfile;
+        liveProfileCache.set(uid, { fetchedAt: Date.now(), profile: prof });
+        onProfile(prof);
+      }
+    },
+    () => {
+      // Non-fatal
+    }
+  );
+}
+
+export function subscribeOwnPrivateInfo(
+  uid: string,
+  onPrivate: (info: UserPrivateInfo) => void
+): Unsubscribe {
+  if (!uid || !LIMITS.ID_PATTERN.test(uid)) {
+    return () => {};
+  }
+  return onSnapshot(
+    doc(db, 'users', uid, 'private', 'info'),
+    (snap) => {
+      if (snap.exists()) {
+        onPrivate(snap.data() as UserPrivateInfo);
+      }
+    },
+    () => {
+      // Non-fatal
+    }
+  );
 }
 
 export function subscribeUserChats(
@@ -1440,7 +1649,7 @@ export async function startChatByUserProfile(params: {
       peerName: sanitizeStr(peerLabel, LIMITS.DISPLAY_NAME_MAX) || 'Friend',
       participantIds: sorted,
       inviteCode: '',
-      lastMessageText: 'Connected on KothaLink',
+      lastMessageText: 'Connected on LoopLy',
       lastMessageSenderId: params.currentUser.uid,
       lastMessageAt: serverTimestamp(),
       createdAt: serverTimestamp(),
@@ -2408,7 +2617,7 @@ export function subscribeStatusesForUids(
         emit();
       },
       (err) => {
-        console.warn('[KothaLink] Status subscription warning:', err?.message || err);
+        console.warn('[LoopLy] Status subscription warning:', err?.message || err);
       }
     );
     unsubs.push(unsub);

@@ -85,6 +85,51 @@ export async function prepareStatusImage(file: File): Promise<string> {
   return dataUrl;
 }
 
+export async function prepareProfileAvatar(fileOrBlob: Blob): Promise<string> {
+  const mime = (fileOrBlob.type || '').toLowerCase();
+  const fileName = fileOrBlob instanceof File ? fileOrBlob.name || '' : 'avatar.jpg';
+  if (mime && !mime.startsWith('image/') && !IMAGE_EXT_REGEX.test(fileName)) {
+    throw new Error('Please choose an image file for your profile photo.');
+  }
+  const objectUrl = URL.createObjectURL(fileOrBlob);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Could not decode selected image.'));
+      el.src = objectUrl;
+    });
+
+    const minSide = Math.max(1, Math.min(img.width, img.height));
+    const sx = Math.max(0, Math.round((img.width - minSide) / 2));
+    const sy = Math.max(0, Math.round((img.height - minSide) / 2));
+
+    const maxBytes = 28_000;
+    const dims = [160, 128, 96];
+    const qualities = [0.82, 0.72, 0.62, 0.5];
+
+    for (const size of dims) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) break;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, size, size);
+      ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, size, size);
+      for (const q of qualities) {
+        const dataUrl = canvas.toDataURL('image/jpeg', q);
+        if (dataUrl.length <= maxBytes) {
+          return dataUrl;
+        }
+      }
+    }
+    throw new Error('Profile photo could not be compressed small enough.');
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 export async function prepareAttachment(file: File): Promise<PreparedAttachment> {
   const cleanName =
     sanitizeStr(file.name || 'attachment', LIMITS.ATTACHMENT_NAME_MAX) || 'attachment';

@@ -30,11 +30,15 @@ interface PolicySection {
   body: string;
 }
 
-const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtitle: string; sections: PolicySection[] }>> = {
+const POLICY_COPY: Partial<
+  Record<AppLanguage, Record<PolicyTab, { title: string; subtitle: string; sections: PolicySection[] }>>
+> & {
+  en: Record<PolicyTab, { title: string; subtitle: string; sections: PolicySection[] }>;
+} = {
   en: {
     privacy: {
       title: 'Privacy Policy',
-      subtitle: 'How KothaLink collects, isolates, and protects your personal information.',
+      subtitle: 'How LoopLy collects, isolates, and protects your personal information.',
       sections: [
         {
           heading: '1. Information You Provide',
@@ -56,7 +60,7 @@ const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtit
     },
     terms: {
       title: 'Terms of Service',
-      subtitle: 'Clear ground rules for using KothaLink responsibly and securely.',
+      subtitle: 'Clear ground rules for using LoopLy responsibly and securely.',
       sections: [
         {
           heading: '1. Eligibility & Account Integrity',
@@ -64,7 +68,7 @@ const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtit
         },
         {
           heading: '2. Messaging, Calls & Local P2P',
-          body: 'KothaLink supports cloud-synced conversations, 1-on-1 WebRTC voice/video calls, and local Web Bluetooth / Nearby QR pairing. Availability of Web Bluetooth depends on browser and hardware permissions.',
+          body: 'LoopLy supports cloud-synced conversations, 1-on-1 WebRTC voice/video calls, and local Web Bluetooth / Nearby QR pairing. Availability of Web Bluetooth depends on browser and hardware permissions.',
         },
         {
           heading: '3. Fair Use & Service Limits',
@@ -82,7 +86,7 @@ const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtit
       sections: [
         {
           heading: '1. Zero Tolerance for Abuse & Harassment',
-          body: 'Harassment, hate speech, threats, impersonation, and phishing links are strictly prohibited on KothaLink.',
+          body: 'Harassment, hate speech, threats, impersonation, and phishing links are strictly prohibited on LoopLy.',
         },
         {
           heading: '2. Block & Report Tools',
@@ -96,15 +100,15 @@ const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtit
     },
     security: {
       title: 'Security & Data Protection',
-      subtitle: 'Defense-in-depth protections built into KothaLink.',
+      subtitle: 'Defense-in-depth protections built into LoopLy.',
       sections: [
         {
           heading: '1. Strict PII Isolation & Hash Directories',
           body: 'Email lookups use irreversible SHA-256 hashes. Public profile cards never contain your raw email address or phone number.',
         },
         {
-          heading: '2. Salted Local App PIN Lock',
-          body: 'When enabled, your 4-digit App PIN is stored as a salted SHA-256 cryptographic digest with brute-force cooldown protection — plaintext PINs are never saved.',
+          heading: '2. AES-256-GCM Encrypted Vault & Salted App PIN',
+          body: 'Sensitive browser-cached metadata is protected with WebCrypto AES-256-GCM using a non-extractable device key stored in IndexedDB. Your optional 4-digit App PIN uses a salted SHA-256 digest with brute-force cooldown.',
         },
         {
           heading: '3. Transport, Rate Limiting & Rules Enforcement',
@@ -116,7 +120,7 @@ const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtit
   bn: {
     privacy: {
       title: 'গোপনীয়তা নীতি (Privacy Policy)',
-      subtitle: 'KothaLink কীভাবে আপনার ব্যক্তিগত তথ্য সংগ্রহ, সংরক্ষণ এবং সুরক্ষিত রাখে।',
+      subtitle: 'LoopLy কীভাবে আপনার ব্যক্তিগত তথ্য সংগ্রহ, সংরক্ষণ এবং সুরক্ষিত রাখে।',
       sections: [
         {
           heading: '১. আমরা যে তথ্য সংগ্রহ করি',
@@ -146,7 +150,7 @@ const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtit
         },
         {
           heading: '২. মেসেজিং, কল ও Nearby P2P',
-          body: 'KothaLink রিয়েল-টাইম চ্যাট, ভয়েস/ভিডিও কল এবং Web Bluetooth / Nearby QR কানেকশন প্রদান করে। Bluetooth ফিচার ব্রাউজার ও ডিভাইসের পারমিশনের উপর নির্ভরশীল।',
+          body: 'LoopLy রিয়েল-টাইম চ্যাট, ভয়েস/ভিডিও কল এবং Web Bluetooth / Nearby QR কানেকশন প্রদান করে। Bluetooth ফিচার ব্রাউজার ও ডিভাইসের পারমিশনের উপর নির্ভরশীল।',
         },
         {
           heading: '৩. স্প্যাম ও অপব্যবহার নিষিদ্ধ',
@@ -174,15 +178,15 @@ const POLICY_COPY: Record<AppLanguage, Record<PolicyTab, { title: string; subtit
     },
     security: {
       title: 'নিরাপত্তা ও ডেটা সুরক্ষা',
-      subtitle: 'KothaLink-এ যুক্ত বহুমুখী নিরাপত্তা ব্যবস্থা।',
+      subtitle: 'LoopLy-এ যুক্ত বহুমুখী নিরাপত্তা ব্যবস্থা।',
       sections: [
         {
           heading: '১. SHA-256 হ্যাশ ডিরেক্টরি ও PII আইসোলেশন',
           body: 'ইমেইল সার্চ এনক্রিপ্টেড SHA-256 হ্যাশ ব্যবহার করে সম্পন্ন হয়, যাতে আপনার আসল ইমেইল পাবলিক ডিরেক্টরিতে প্রকাশ না পায়।',
         },
         {
-          heading: '২. সল্টেড অ্যাপ পিন লক',
-          body: 'অ্যাপ লক চালু করলে আপনার ৪-ডিজিটের পিন সল্টেড SHA-256 হ্যাশ আকারে সংরক্ষিত থাকে এবং বারবার ভুল পিন দিলে স্বয়ংক্রিয় কুলডাউন চালু হয়।',
+          heading: '২. AES-256-GCM এনক্রিপ্টেড ভল্ট ও সল্টেড অ্যাপ পিন',
+          body: 'আপনার ডিভাইসে থাকা সংবেদনশীল মেটাডেটা WebCrypto AES-256-GCM এবং IndexedDB কী-স্টোর দিয়ে এনক্রিপ্ট করে রাখা হয়। ৪-ডিজিট অ্যাপ পিন সল্টেড SHA-256 হ্যাশ হিসেবে সংরক্ষিত থাকে।',
         },
         {
           heading: '৩. সার্ভার ও ডাটাবেস নিরাপত্তা',
@@ -213,7 +217,7 @@ export const LegalPolicyModal: React.FC<Props> = ({
 
   if (!isOpen) return null;
 
-  const content = POLICY_COPY[lang][activeTab];
+  const content = (POLICY_COPY[lang] || POLICY_COPY.en)[activeTab];
   const alreadyAccepted = acceptedVersion === CURRENT_POLICY_VERSION;
 
   const handleAccept = async () => {
@@ -305,7 +309,7 @@ export const LegalPolicyModal: React.FC<Props> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-5 sm:p-6 overflow-y-auto space-y-5 flex-1">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 flex-1 min-h-0">
           <div className="space-y-1">
             <h3 className="text-lg font-bold text-slate-900 dark:text-white">{content.title}</h3>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
@@ -335,7 +339,7 @@ export const LegalPolicyModal: React.FC<Props> = ({
           <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
             <FileCheck2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
             <span>
-              KothaLink Official · v{CURRENT_POLICY_VERSION}
+              LoopLy Official · v{CURRENT_POLICY_VERSION}
               {alreadyAccepted ? ` · ${t(lang, 'policyAcceptedBadge')}` : ''}
             </span>
           </div>

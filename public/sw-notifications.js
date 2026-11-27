@@ -1,14 +1,9 @@
-self.addEventListener('install', () => {
-  self.skipWaiting();
-});
-
-self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
-});
-
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const chatId = event.notification.data && event.notification.data.chatId ? event.notification.data.chatId : null;
+  const chatId =
+    event.notification.data && event.notification.data.chatId
+      ? event.notification.data.chatId
+      : null;
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {

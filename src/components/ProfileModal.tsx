@@ -1,31 +1,41 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowLeft,
   Ban,
   Bell,
   BellRing,
+  Camera,
   Check,
   CheckCheck,
+  Copy,
   CornerDownLeft,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
   FileCheck2,
+  Globe,
+  HardDrive,
   KeyRound,
   Loader2,
   Lock,
   LogOut,
+  Mail,
+  Mic,
   Moon,
   Scale,
   Search,
   Settings,
+  Share2,
   ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   Sun,
   Trash2,
+  Upload,
   User,
+  UserPlus,
   Volume2,
   VolumeX,
   X,
@@ -38,16 +48,22 @@ import {
   getAppLockConfig,
   updateAppLockDelay,
 } from '../lib/appLock';
+import { prepareProfileAvatar } from '../lib/attachments';
 import { formatFriendlyError, updateUserSettings } from '../lib/chatService';
 import { t } from '../lib/i18n';
+import { getPublicAppOrigin } from '../lib/shareLink';
 import {
   AppLanguage,
   AppTheme,
   CURRENT_POLICY_VERSION,
+  OnlineVisibility,
   UserPrivateInfo,
   UserPublicProfile,
+  WORLD_LANGUAGES,
 } from '../types/chat';
+import { CameraCaptureModal } from './CameraCaptureModal';
 import { PolicyTab } from './LegalPolicyModal';
+import { PWAInstallButton } from './PWAInstallButton';
 import { UserAvatar } from './UserAvatar';
 
 interface Props {
@@ -65,17 +81,22 @@ interface Props {
   onUpdated: (updates: {
     displayName: string;
     bio: string;
+    photoUrl: string;
     language: AppLanguage;
+    showGmail: boolean;
+    onlineVisibility: OnlineVisibility;
     showOnlineStatus: boolean;
     searchable: boolean;
     readReceiptsEnabled: boolean;
   }) => void;
   onChangeTheme: (mode: AppTheme) => void;
+  onChangeLanguage?: (lang: AppLanguage) => void;
   onToggleSound: () => void;
   onRequestBgNotifications: () => void;
   onToggleEnterToSend: (val: boolean) => void;
   onUnblockUser: (targetUid: string) => Promise<void>;
   onOpenLegalModal: (tab: PolicyTab) => void;
+  onOpenInviteModal?: () => void;
   onExportData: () => void;
   onLockAppNow: () => void;
   onAppLockChanged: () => void;
@@ -84,7 +105,7 @@ interface Props {
 }
 
 const BIO_PRESETS_EN = [
-  'Available on KothaLink',
+  'Available on LoopLy',
   'Busy right now',
   'At work',
   'In a meeting',
@@ -92,7 +113,7 @@ const BIO_PRESETS_EN = [
 ];
 
 const BIO_PRESETS_BN = [
-  'KothaLink-এ আছি',
+  'LoopLy-এ আছি',
   'এখন ব্যস্ত আছি',
   'কাজে আছি',
   'মিটিংয়ে আছি',
@@ -140,11 +161,13 @@ export const ProfileModal: React.FC<Props> = ({
   onClose,
   onUpdated,
   onChangeTheme,
+  onChangeLanguage,
   onToggleSound,
   onRequestBgNotifications,
   onToggleEnterToSend,
   onUnblockUser,
   onOpenLegalModal,
+  onOpenInviteModal,
   onExportData,
   onLockAppNow,
   onAppLockChanged,
@@ -153,17 +176,48 @@ export const ProfileModal: React.FC<Props> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'profile' | 'settings' | 'account'>(initialTab);
   const [displayName, setDisplayName] = useState(publicProfile.displayName);
-  const [bio, setBio] = useState(publicProfile.bio || '');
+  const [bio, setBio] = useState(
+    publicProfile.bio && publicProfile.bio !== 'Available on KothaLink'
+      ? publicProfile.bio
+      : 'Available on LoopLy'
+  );
+  const [photoUrl, setPhotoUrl] = useState(publicProfile.photoUrl || '');
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [avatarCameraOpen, setAvatarCameraOpen] = useState(false);
+  const avatarFileInputRef = useRef<HTMLInputElement>(null);
+
   const [selectedLang, setSelectedLang] = useState<AppLanguage>(lang);
-  const [showOnlineStatus, setShowOnlineStatus] = useState<boolean>(
-    publicProfile.showOnlineStatus !== false
-  );
-  const [searchable, setSearchable] = useState<boolean>(
-    publicProfile.searchable !== false
-  );
+  const [worldLangOpen, setWorldLangOpen] = useState(false);
+  const [langSearch, setLangSearch] = useState('');
+
+  const [showGmail, setShowGmail] = useState<boolean>(publicProfile.showGmail !== false);
+  const [onlineVisibility, setOnlineVisibility] = useState<OnlineVisibility>(() => {
+    if (
+      publicProfile.onlineVisibility === 'everyone' ||
+      publicProfile.onlineVisibility === 'contacts' ||
+      publicProfile.onlineVisibility === 'nobody'
+    ) {
+      return publicProfile.onlineVisibility;
+    }
+    return publicProfile.showOnlineStatus === false ? 'nobody' : 'everyone';
+  });
+  const [searchable, setSearchable] = useState<boolean>(publicProfile.searchable !== false);
   const [readReceiptsEnabled, setReadReceiptsEnabled] = useState<boolean>(
     privateInfo.readReceiptsEnabled !== false
   );
+
+  // Permissions & Storage state
+  const [cameraPerm, setCameraPerm] = useState<'granted' | 'denied' | 'prompt' | 'unknown'>('unknown');
+  const [micPerm, setMicPerm] = useState<'granted' | 'denied' | 'prompt' | 'unknown'>('unknown');
+  const [storageInfo, setStorageInfo] = useState<{
+    usedMb: string;
+    quotaMb: string;
+    persisted: boolean | null;
+  }>({ usedMb: '0.0', quotaMb: '—', persisted: null });
+  const [cacheNotice, setCacheNotice] = useState('');
+  const [copiedInviteLink, setCopiedInviteLink] = useState(false);
+  const [copiedPrivacyUrl, setCopiedPrivacyUrl] = useState(false);
+
   const [appLockConfig, setAppLockConfig] = useState<AppLockConfig | null>(() =>
     getAppLockConfig(publicProfile.uid)
   );
@@ -181,22 +235,239 @@ export const ProfileModal: React.FC<Props> = ({
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [error, setError] = useState('');
 
+  const refreshDevicePermissionsAndStorage = useCallback(async () => {
+    if (typeof navigator === 'undefined') return;
+    if (navigator.permissions?.query) {
+      for (const [name, setter] of [
+        ['camera', setCameraPerm],
+        ['microphone', setMicPerm],
+      ] as const) {
+        try {
+          const status = await navigator.permissions.query({ name: name as PermissionName });
+          setter(status.state);
+        } catch {
+          setter('prompt');
+        }
+      }
+    } else {
+      setCameraPerm('prompt');
+      setMicPerm('prompt');
+    }
+
+    if (navigator.storage) {
+      try {
+        const est = await navigator.storage.estimate();
+        const used = est.usage ? (est.usage / (1024 * 1024)).toFixed(1) : '0.0';
+        const quota = est.quota ? `${Math.round(est.quota / (1024 * 1024))} MB` : '—';
+        const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : null;
+        setStorageInfo({ usedMb: used, quotaMb: quota, persisted });
+      } catch {
+        // Ignore estimate failures
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
+      setDisplayName(publicProfile.displayName);
+      setBio(
+        publicProfile.bio && publicProfile.bio !== 'Available on KothaLink'
+          ? publicProfile.bio
+          : 'Available on LoopLy'
+      );
+      setPhotoUrl(publicProfile.photoUrl || '');
+      setSelectedLang(lang);
+      setShowGmail(publicProfile.showGmail !== false);
+      setOnlineVisibility(
+        publicProfile.onlineVisibility === 'everyone' ||
+          publicProfile.onlineVisibility === 'contacts' ||
+          publicProfile.onlineVisibility === 'nobody'
+          ? publicProfile.onlineVisibility
+          : publicProfile.showOnlineStatus === false
+          ? 'nobody'
+          : 'everyone'
+      );
+      setSearchable(publicProfile.searchable !== false);
+      setReadReceiptsEnabled(privateInfo.readReceiptsEnabled !== false);
       const cfg = getAppLockConfig(publicProfile.uid);
       setAppLockConfig(cfg);
       setAutoLockMinutes(cfg?.autoLockMinutes ?? 1);
       setShowPinEditor(false);
       setPinDraft('');
       setPinError('');
+      setError('');
+      setCacheNotice('');
+      setWorldLangOpen(false);
+      setLangSearch('');
+      void refreshDevicePermissionsAndStorage();
     }
-  }, [isOpen, initialTab, publicProfile.uid]);
+  }, [
+    isOpen,
+    initialTab,
+    publicProfile.uid,
+    publicProfile.displayName,
+    publicProfile.bio,
+    publicProfile.photoUrl,
+    publicProfile.showGmail,
+    publicProfile.onlineVisibility,
+    publicProfile.showOnlineStatus,
+    publicProfile.searchable,
+    privateInfo.readReceiptsEnabled,
+    lang,
+    refreshDevicePermissionsAndStorage,
+  ]);
 
   if (!isOpen) return null;
 
   const bioPresets = selectedLang === 'bn' ? BIO_PRESETS_BN : BIO_PRESETS_EN;
   const blockedUids = privateInfo.blockedUids || [];
+  const showOnlineStatusBool = onlineVisibility !== 'nobody';
+
+  const persistProfileSettings = async (overrides?: {
+    photoUrl?: string;
+    language?: AppLanguage;
+  }) => {
+    const targetPhoto = overrides?.photoUrl !== undefined ? overrides.photoUrl : photoUrl;
+    const targetLang = overrides?.language !== undefined ? overrides.language : selectedLang;
+    const cleanBio = bio.trim() || 'Available on LoopLy';
+    const cleanName = displayName.trim() || publicProfile.displayName;
+    await updateUserSettings({
+      uid: publicProfile.uid,
+      email: privateInfo.email,
+      displayName: cleanName,
+      bio: cleanBio,
+      photoUrl: targetPhoto,
+      language: targetLang,
+      showGmail,
+      onlineVisibility,
+      showOnlineStatus: showOnlineStatusBool,
+      searchable,
+      readReceiptsEnabled,
+    });
+    onUpdated({
+      displayName: cleanName,
+      bio: cleanBio,
+      photoUrl: targetPhoto,
+      language: targetLang,
+      showGmail,
+      onlineVisibility,
+      showOnlineStatus: showOnlineStatusBool,
+      searchable,
+      readReceiptsEnabled,
+    });
+  };
+
+  const handleAvatarFileOrCamera = async (blob: Blob) => {
+    setError('');
+    setPhotoBusy(true);
+    try {
+      const nextPhoto = await prepareProfileAvatar(blob);
+      setPhotoUrl(nextPhoto);
+      await persistProfileSettings({ photoUrl: nextPhoto });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update profile photo.');
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
+
+  const handleRemovePhoto = async () => {
+    setError('');
+    setPhotoBusy(true);
+    try {
+      setPhotoUrl('');
+      await persistProfileSettings({ photoUrl: '' });
+    } catch (err) {
+      setError(formatFriendlyError(err));
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
+
+  const handleSelectLanguage = (code: AppLanguage) => {
+    setSelectedLang(code);
+    onChangeLanguage?.(code);
+    void persistProfileSettings({ language: code }).catch(() => {});
+  };
+
+  const handleRequestDevicePermission = async (kind: 'camera' | 'microphone') => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setError(t(lang, 'mediaPermDenied'));
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(
+        kind === 'camera' ? { video: true, audio: false } : { audio: true, video: false }
+      );
+      stream.getTracks().forEach((tr) => tr.stop());
+      if (kind === 'camera') setCameraPerm('granted');
+      else setMicPerm('granted');
+    } catch {
+      if (kind === 'camera') setCameraPerm('denied');
+      else setMicPerm('denied');
+      setError(t(lang, 'mediaPermDenied'));
+    }
+  };
+
+  const handleRequestStoragePersist = async () => {
+    if (typeof navigator === 'undefined' || !navigator.storage?.persist) return;
+    try {
+      const granted = await navigator.storage.persist();
+      setStorageInfo((prev) => ({ ...prev, persisted: granted }));
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleClearAppCache = async () => {
+    try {
+      if (typeof window !== 'undefined') {
+        Object.keys(localStorage).forEach((k) => {
+          if (k.startsWith('kl_search_idx_')) {
+            localStorage.removeItem(k);
+          }
+        });
+      }
+      if (typeof caches !== 'undefined') {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+      setCacheNotice(t(lang, 'cacheClearedMsg'));
+      void refreshDevicePermissionsAndStorage();
+      window.setTimeout(() => setCacheNotice(''), 2500);
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleCopyInviteLink = async () => {
+    const url = getPublicAppOrigin();
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedInviteLink(true);
+      window.setTimeout(() => setCopiedInviteLink(false), 1800);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
+
+  const handleShareInviteLink = async () => {
+    const url = getPublicAppOrigin();
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        await navigator.share({
+          title: 'LoopLy',
+          text: t(lang, 'tagline'),
+          url,
+        });
+        return;
+      } catch {
+        // Fallback to copy
+      }
+    }
+    await handleCopyInviteLink();
+  };
 
   const handleSavePin = async () => {
     if (!/^\d{4}$/.test(pinDraft)) {
@@ -241,25 +512,7 @@ export const ProfileModal: React.FC<Props> = ({
     setError('');
     setSaving(true);
     try {
-      await updateUserSettings({
-        uid: publicProfile.uid,
-        email: privateInfo.email,
-        displayName,
-        bio,
-        photoUrl: publicProfile.photoUrl,
-        language: selectedLang,
-        showOnlineStatus,
-        searchable,
-        readReceiptsEnabled,
-      });
-      onUpdated({
-        displayName: displayName.trim() || publicProfile.displayName,
-        bio: bio.trim(),
-        language: selectedLang,
-        showOnlineStatus,
-        searchable,
-        readReceiptsEnabled,
-      });
+      await persistProfileSettings();
       setSavedToast(true);
       window.setTimeout(() => {
         setSavedToast(false);
@@ -287,6 +540,18 @@ export const ProfileModal: React.FC<Props> = ({
       setDeletingAccount(false);
     }
   };
+
+  const filteredWorldLanguages = WORLD_LANGUAGES.filter((item) => {
+    const q = langSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      item.nativeName.toLowerCase().includes(q) ||
+      item.englishName.toLowerCase().includes(q) ||
+      item.code.toLowerCase().includes(q)
+    );
+  });
+
+  const activeLangMeta = WORLD_LANGUAGES.find((l) => l.code === selectedLang) || WORLD_LANGUAGES[0];
 
   const tabs = [
     { id: 'profile' as const, label: t(lang, 'profileTab'), icon: User },
@@ -336,7 +601,7 @@ export const ProfileModal: React.FC<Props> = ({
         </div>
 
         {/* Animated 3-Tab Switcher */}
-        <div className="px-6 pt-4 shrink-0">
+        <div className="px-4 sm:px-6 pt-3 sm:pt-4 shrink-0">
           <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
             {tabs.map((tab) => {
               const Icon = tab.icon;
@@ -367,8 +632,8 @@ export const ProfileModal: React.FC<Props> = ({
           </div>
         </div>
 
-        <form onSubmit={handleSave} className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        <form onSubmit={handleSave} className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4">
             <AnimatePresence mode="wait">
               {activeTab === 'profile' && (
                 <motion.div
@@ -379,25 +644,78 @@ export const ProfileModal: React.FC<Props> = ({
                   transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                   className="space-y-4"
                 >
-                  {/* Profile Avatar & Bio Card */}
-                  <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
-                    <UserAvatar
-                      name={displayName.trim() || publicProfile.displayName}
-                      photoUrl={publicProfile.photoUrl}
-                      size="lg"
-                      isOnline={showOnlineStatus}
-                      ringColorClass="ring-white dark:ring-slate-950"
+                  {/* Editable Profile Avatar & Bio Card */}
+                  <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3.5">
+                    <div className="flex items-center gap-3.5">
+                      <div className="relative shrink-0">
+                        <UserAvatar
+                          name={displayName.trim() || publicProfile.displayName}
+                          photoUrl={photoUrl}
+                          size="xl"
+                          isOnline={showOnlineStatusBool}
+                          ringColorClass="ring-white dark:ring-slate-950"
+                        />
+                        {photoBusy && (
+                          <div className="absolute inset-0 rounded-full bg-black/50 flex items-center justify-center text-white">
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">
+                          {displayName.trim() || publicProfile.displayName}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                          {showGmail ? privateInfo.email : t(lang, 'gmailHiddenLabel')}
+                        </div>
+                        <div className="text-xs text-blue-600 dark:text-blue-400 truncate font-medium">
+                          {bio.trim() || 'Available on LoopLy'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <input
+                      ref={avatarFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (file) void handleAvatarFileOrCamera(file);
+                      }}
                     />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">
-                        {displayName.trim() || publicProfile.displayName}
-                      </div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                        {privateInfo.email}
-                      </div>
-                      <div className="text-xs text-blue-600 dark:text-blue-400 truncate mt-0.5 font-medium">
-                        {bio.trim() || t(lang, 'noBioYet')}
-                      </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        disabled={photoBusy}
+                        onClick={() => avatarFileInputRef.current?.click()}
+                        className="min-h-[36px] px-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{t(lang, 'uploadPhotoFileBtn')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={photoBusy}
+                        onClick={() => setAvatarCameraOpen(true)}
+                        className="min-h-[36px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        <span>{t(lang, 'takePhotoNow')}</span>
+                      </button>
+                      {photoUrl && (
+                        <button
+                          type="button"
+                          disabled={photoBusy}
+                          onClick={() => void handleRemovePhoto()}
+                          className="min-h-[36px] px-2.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/30 hover:bg-red-100 text-red-600 dark:text-red-400 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>{t(lang, 'resetPhotoBtn')}</span>
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -438,23 +756,94 @@ export const ProfileModal: React.FC<Props> = ({
                       <span className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">
                         {t(lang, 'bioPresetsLabel')}:
                       </span>
-                      <div className="flex flex-wrap gap-1.5">
-                        {bioPresets.map((preset) => (
-                          <motion.button
-                            key={preset}
-                            type="button"
-                            whileTap={{ scale: 0.94 }}
-                            onClick={() => setBio(preset)}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors ${
-                              bio === preset
-                                ? 'bg-blue-600 text-white border-blue-600'
-                                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-blue-500'
-                            }`}
-                          >
-                            {preset}
-                          </motion.button>
-                        ))}
+                      <div className="p-1.5 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex flex-wrap gap-1.5">
+                        {bioPresets.map((preset) => {
+                          const isActive = bio === preset;
+                          return (
+                            <motion.button
+                              key={preset}
+                              type="button"
+                              whileHover={{ scale: 1.03 }}
+                              whileTap={{ scale: 0.93 }}
+                              transition={{ type: 'spring', stiffness: 500, damping: 28 }}
+                              onClick={() => setBio(preset)}
+                              aria-pressed={isActive}
+                              className={`relative z-10 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-colors ${
+                                isActive
+                                  ? 'text-white'
+                                  : 'bg-white/80 dark:bg-slate-900 text-slate-700 dark:text-slate-300 border border-slate-200/80 dark:border-slate-800 hover:border-blue-400 dark:hover:border-blue-600'
+                              }`}
+                            >
+                              {isActive && (
+                                <motion.span
+                                  layoutId="profileBioPresetToggle"
+                                  transition={{ type: 'spring', stiffness: 460, damping: 30, mass: 0.75 }}
+                                  className="absolute inset-0 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 shadow-sm shadow-blue-600/25 -z-10"
+                                />
+                              )}
+                              <motion.span
+                                animate={{
+                                  scale: isActive ? 1 : 0.75,
+                                  backgroundColor: isActive ? '#34d399' : '#94a3b8',
+                                }}
+                                transition={{ type: 'spring', stiffness: 500, damping: 24 }}
+                                className="w-1.5 h-1.5 rounded-full shrink-0"
+                              />
+                              <span>{preset}</span>
+                            </motion.button>
+                          );
+                        })}
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Invite Friends Card */}
+                  <div className="p-3.5 rounded-2xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 space-y-2.5">
+                    <div className="flex items-start gap-2.5">
+                      <UserPlus className="w-4 h-4 text-blue-600 dark:text-blue-400 mt-0.5 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-slate-900 dark:text-white">
+                          {t(lang, 'inviteFriendsSection')}
+                        </div>
+                        <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                          {t(lang, 'inviteFriendsHint')}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyInviteLink()}
+                        className="min-h-[36px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5"
+                      >
+                        {copiedInviteLink ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-500" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        )}
+                        <span>{copiedInviteLink ? t(lang, 'copied') : t(lang, 'copyAppLinkBtn')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleShareInviteLink()}
+                        className="min-h-[36px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-1.5"
+                      >
+                        <Share2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                        <span>{t(lang, 'shareAppLink')}</span>
+                      </button>
+                      {onOpenInviteModal && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            onOpenInviteModal();
+                          }}
+                          className="min-h-[36px] px-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                        >
+                          <UserPlus className="w-3.5 h-3.5" />
+                          <span>{t(lang, 'openInviteModalBtn')}</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </motion.div>
@@ -469,7 +858,9 @@ export const ProfileModal: React.FC<Props> = ({
                   transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                   className="space-y-5"
                 >
-                  {/* Appearance & Language */}
+                  <PWAInstallButton lang={lang} variant="card" />
+
+                  {/* Appearance & Worldwide Language */}
                   <div className="space-y-2.5">
                     <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                       {t(lang, 'appearanceSection')}
@@ -520,25 +911,30 @@ export const ProfileModal: React.FC<Props> = ({
                         </div>
                       </div>
 
-                      <div className="space-y-1.5">
-                        <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
-                          {t(lang, 'languageLabel')}
-                        </label>
-                        <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">
+                            {t(lang, 'languageLabel')}
+                          </label>
+                          <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                            {activeLangMeta.nativeName} ({activeLangMeta.englishName})
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800">
                           <button
                             type="button"
-                            onClick={() => setSelectedLang('en')}
+                            onClick={() => handleSelectLanguage('en')}
                             className={`py-1.5 rounded-lg text-xs font-medium transition-colors ${
                               selectedLang === 'en'
                                 ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
                                 : 'text-slate-600 dark:text-slate-400'
                             }`}
                           >
-                            EN
+                            English
                           </button>
                           <button
                             type="button"
-                            onClick={() => setSelectedLang('bn')}
+                            onClick={() => handleSelectLanguage('bn')}
                             className={`py-1.5 rounded-lg text-xs font-medium transition-colors ${
                               selectedLang === 'bn'
                                 ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
@@ -547,7 +943,62 @@ export const ProfileModal: React.FC<Props> = ({
                           >
                             বাংলা
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => setWorldLangOpen((v) => !v)}
+                            className={`py-1.5 px-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1 transition-colors ${
+                              worldLangOpen || (selectedLang !== 'en' && selectedLang !== 'bn')
+                                ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm'
+                                : 'text-slate-600 dark:text-slate-400'
+                            }`}
+                          >
+                            <Globe className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">{t(lang, 'allLanguagesLabel')}</span>
+                          </button>
                         </div>
+
+                        {worldLangOpen && (
+                          <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                            <input
+                              type="text"
+                              value={langSearch}
+                              onChange={(e) => setLangSearch(e.target.value)}
+                              placeholder={t(lang, 'searchLanguagesPlaceholder')}
+                              className="w-full min-h-[36px] px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs focus:outline-none focus:ring-2 focus:ring-blue-600"
+                            />
+                            <div className="grid grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-0.5">
+                              {filteredWorldLanguages.map((item) => {
+                                const isSel = selectedLang === item.code;
+                                return (
+                                  <button
+                                    key={item.code}
+                                    type="button"
+                                    onClick={() => handleSelectLanguage(item.code)}
+                                    className={`px-2.5 py-2 rounded-xl border text-left transition-colors flex items-center justify-between gap-1.5 ${
+                                      isSel
+                                        ? 'bg-blue-600 border-blue-600 text-white'
+                                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 hover:border-blue-400'
+                                    }`}
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-xs font-semibold truncate">
+                                        {item.nativeName}
+                                      </div>
+                                      <div
+                                        className={`text-[10px] truncate ${
+                                          isSel ? 'text-blue-100' : 'text-slate-400'
+                                        }`}
+                                      >
+                                        {item.englishName}
+                                      </div>
+                                    </div>
+                                    {isSel && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -626,6 +1077,129 @@ export const ProfileModal: React.FC<Props> = ({
                     </div>
                   </div>
 
+                  {/* Permissions & Device Storage */}
+                  <div className="space-y-2.5">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      {t(lang, 'permissionsStorageSection')}
+                    </div>
+
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Camera className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                              {t(lang, 'permCamera')}
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                              {cameraPerm === 'granted'
+                                ? t(lang, 'permAllowed')
+                                : cameraPerm === 'denied'
+                                ? t(lang, 'permBlocked')
+                                : t(lang, 'permAsk')}
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={cameraPerm === 'granted'}
+                          onClick={() => void handleRequestDevicePermission('camera')}
+                          className={`min-h-[32px] px-3 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 ${
+                            cameraPerm === 'granted'
+                              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                              : cameraPerm === 'denied'
+                              ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                              : 'bg-blue-600 hover:bg-blue-700 text-white'
+                          }`}
+                        >
+                          {cameraPerm === 'granted'
+                            ? t(lang, 'permAllowed')
+                            : cameraPerm === 'denied'
+                            ? t(lang, 'permBlocked')
+                            : t(lang, 'allowBtn')}
+                        </button>
+                      </div>
+
+                      <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Mic className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                              {t(lang, 'permMic')}
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                              {micPerm === 'granted'
+                                ? t(lang, 'permAllowed')
+                                : micPerm === 'denied'
+                                ? t(lang, 'permBlocked')
+                                : t(lang, 'permAsk')}
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={micPerm === 'granted'}
+                          onClick={() => void handleRequestDevicePermission('microphone')}
+                          className={`min-h-[32px] px-3 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 ${
+                            micPerm === 'granted'
+                              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                              : micPerm === 'denied'
+                              ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                              : 'bg-blue-600 hover:bg-blue-700 text-white'
+                          }`}
+                        >
+                          {micPerm === 'granted'
+                            ? t(lang, 'permAllowed')
+                            : micPerm === 'denied'
+                            ? t(lang, 'permBlocked')
+                            : t(lang, 'allowBtn')}
+                        </button>
+                      </div>
+
+                      <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <HardDrive className="w-4 h-4 text-slate-500 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                              {t(lang, 'permStorage')}
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular">
+                              {storageInfo.usedMb} MB / {storageInfo.quotaMb}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {storageInfo.persisted !== true && (
+                            <button
+                              type="button"
+                              onClick={() => void handleRequestStoragePersist()}
+                              className="min-h-[32px] px-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold whitespace-nowrap"
+                            >
+                              {t(lang, 'enablePersistenceBtn')}
+                            </button>
+                          )}
+                          {storageInfo.persisted === true && (
+                            <span className="min-h-[32px] px-2.5 rounded-xl bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 text-[11px] font-semibold inline-flex items-center">
+                              {t(lang, 'persistentActiveBtn')}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void handleClearAppCache()}
+                            className="min-h-[32px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap"
+                          >
+                            {t(lang, 'clearCacheBtn')}
+                          </button>
+                        </div>
+                      </div>
+                      {cacheNotice && (
+                        <p className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                          ✓ {cacheNotice}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
                   {/* Privacy & Chat Behavior */}
                   <div className="space-y-2.5">
                     <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
@@ -633,27 +1207,69 @@ export const ProfileModal: React.FC<Props> = ({
                     </div>
 
                     <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3.5">
+                      {/* Show / Hide Gmail */}
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-start gap-2.5 min-w-0">
-                          {showOnlineStatus ? (
+                          <Mail
+                            className={`w-4 h-4 mt-0.5 shrink-0 ${
+                              showGmail ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'
+                            }`}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                              {t(lang, 'showGmailLabel')}
+                            </div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">
+                              {t(lang, 'showGmailHint')}
+                            </div>
+                          </div>
+                        </div>
+                        <AnimatedSwitch
+                          checked={showGmail}
+                          onToggle={() => setShowGmail((v) => !v)}
+                          label={t(lang, 'showGmailLabel')}
+                        />
+                      </div>
+
+                      {/* Online & Last Seen Audience Control */}
+                      <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                        <div className="flex items-start gap-2.5">
+                          {onlineVisibility !== 'nobody' ? (
                             <Eye className="w-4 h-4 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0" />
                           ) : (
                             <EyeOff className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
                           )}
                           <div className="min-w-0">
                             <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                              {t(lang, 'showOnlineLabel')}
+                              {t(lang, 'onlineVisibilityLabel')}
                             </div>
                             <div className="text-xs text-slate-500 dark:text-slate-400">
-                              {t(lang, 'showOnlineHint')}
+                              {t(lang, 'onlineVisibilityHint')}
                             </div>
                           </div>
                         </div>
-                        <AnimatedSwitch
-                          checked={showOnlineStatus}
-                          onToggle={() => setShowOnlineStatus((v) => !v)}
-                          label={t(lang, 'showOnlineLabel')}
-                        />
+                        <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                          {(
+                            [
+                              { id: 'everyone' as const, label: t(lang, 'visEveryone') },
+                              { id: 'contacts' as const, label: t(lang, 'visContacts') },
+                              { id: 'nobody' as const, label: t(lang, 'visNobody') },
+                            ] as const
+                          ).map((opt) => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setOnlineVisibility(opt.id)}
+                              className={`min-h-[34px] px-2 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap ${
+                                onlineVisibility === opt.id
+                                  ? 'bg-blue-600 text-white shadow-sm'
+                                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
                       <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
@@ -941,11 +1557,79 @@ export const ProfileModal: React.FC<Props> = ({
                     </div>
                   </div>
 
-                  {/* Legal & Policies */}
+                  {/* Legal & Privacy Policy Link */}
                   <div className="space-y-2.5">
                     <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                       {t(lang, 'legalSectionTitle')}
                     </div>
+
+                    {(() => {
+                      const privacyUrl = `${getPublicAppOrigin()}/?policy=privacy`;
+                      return (
+                        <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                          <div className="flex items-start justify-between gap-2.5">
+                            <div className="flex items-start gap-2.5 min-w-0">
+                              <span className="w-8 h-8 rounded-xl bg-blue-600/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                                <ShieldCheck className="w-4 h-4" />
+                              </span>
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                                  {t(lang, 'privacyPolicyLinkTitle')}
+                                </div>
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                  {t(lang, 'privacyPolicyLinkDesc')}
+                                </p>
+                              </div>
+                            </div>
+                            <span className="px-2 py-0.5 rounded-lg bg-emerald-500/12 text-emerald-700 dark:text-emerald-400 text-[10px] font-semibold whitespace-nowrap shrink-0">
+                              {t(lang, 'encryptionActiveBadge')}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2 p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+                            <a
+                              href={privacyUrl}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                onOpenLegalModal('privacy');
+                              }}
+                              className="flex-1 min-w-0 text-[11px] font-mono-tabular text-blue-600 dark:text-blue-400 hover:underline truncate"
+                            >
+                              {privacyUrl}
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void navigator.clipboard?.writeText(privacyUrl).catch(() => {});
+                                setCopiedPrivacyUrl(true);
+                                window.setTimeout(() => setCopiedPrivacyUrl(false), 1800);
+                              }}
+                              className="min-h-[30px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1 whitespace-nowrap shrink-0"
+                            >
+                              {copiedPrivacyUrl ? (
+                                <>
+                                  <Check className="w-3 h-3 text-emerald-500" />
+                                  <span>{t(lang, 'copied')}</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>{t(lang, 'copyPolicyLinkBtn')}</span>
+                                </>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onOpenLegalModal('privacy')}
+                              className="min-h-[30px] px-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                              <span>{t(lang, 'openPrivacyPolicyBtn')}</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     <div className="grid grid-cols-2 gap-2">
                       {(
@@ -1019,6 +1703,10 @@ export const ProfileModal: React.FC<Props> = ({
                       </span>
                       <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500/12 text-blue-700 dark:text-blue-400">
                         <Lock className="w-3.5 h-3.5" />
+                        {t(lang, 'encryptionActiveBadge')}
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-500/12 text-indigo-700 dark:text-indigo-400">
+                        <ShieldCheck className="w-3.5 h-3.5" />
                         {t(lang, 'strictIsolationBadge')}
                       </span>
                       {privateInfo.acceptedPolicyVersion === CURRENT_POLICY_VERSION && (
@@ -1131,7 +1819,7 @@ export const ProfileModal: React.FC<Props> = ({
               <motion.button
                 type="submit"
                 whileTap={{ scale: 0.97 }}
-                disabled={saving || deletingAccount}
+                disabled={saving || photoBusy || deletingAccount}
                 className="min-h-[42px] px-5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap"
               >
                 {savedToast ? (
@@ -1152,6 +1840,14 @@ export const ProfileModal: React.FC<Props> = ({
           )}
         </form>
       </motion.div>
+
+      <CameraCaptureModal
+        isOpen={avatarCameraOpen}
+        mode="avatar"
+        lang={lang}
+        onCaptureFile={(file) => handleAvatarFileOrCamera(file)}
+        onClose={() => setAvatarCameraOpen(false)}
+      />
     </div>
   );
 };

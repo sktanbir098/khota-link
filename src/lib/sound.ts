@@ -440,10 +440,20 @@ export async function playCallHangupTone(): Promise<void> {
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return null;
   try {
+    const existing = await navigator.serviceWorker.getRegistration();
+    if (existing) {
+      swRegistration = existing;
+      return existing;
+    }
     swRegistration = await navigator.serviceWorker.register('/sw.js');
     return swRegistration;
   } catch {
-    return null;
+    try {
+      swRegistration = await navigator.serviceWorker.ready;
+      return swRegistration;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -475,7 +485,7 @@ export async function showBackgroundNotification(params: {
 
   const options: NotificationOptions & { renotify?: boolean; vibrate?: number[] } = {
     body: params.body,
-    tag: `kothalink-${params.chatId}`,
+    tag: `looply-${params.chatId}`,
     renotify: true,
     silent: false,
     vibrate: [120, 60, 120],
@@ -497,7 +507,7 @@ export async function showBackgroundNotification(params: {
   try {
     const n = new Notification(params.title, {
       body: params.body,
-      tag: `kothalink-${params.chatId}`,
+      tag: `looply-${params.chatId}`,
       silent: false,
     });
     n.onclick = () => {

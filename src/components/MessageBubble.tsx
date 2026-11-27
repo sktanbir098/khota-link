@@ -57,6 +57,7 @@ interface Props {
   onCopy?: () => void;
   onShowInfo?: () => void;
   onDelete?: () => Promise<void> | void;
+  onBeforeDeleteSand?: (rect: DOMRect, isMe: boolean) => void;
   onPreviewImage?: (dataUrl: string, name: string) => void;
   onResolveAttachment?: (messageId: string, marker: string) => Promise<string>;
   searchQuery?: string;
@@ -130,6 +131,7 @@ const MessageBubbleInner: React.FC<Props> = ({
   onCopy,
   onShowInfo,
   onDelete,
+  onBeforeDeleteSand,
   onPreviewImage,
   onResolveAttachment,
   searchQuery = '',
@@ -139,6 +141,7 @@ const MessageBubbleInner: React.FC<Props> = ({
   const [showMoreEmojis, setShowMoreEmojis] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deletingMsg, setDeletingMsg] = useState(false);
+  const [sandDissolving, setSandDissolving] = useState(false);
   const [copiedText, setCopiedText] = useState(false);
   const [resolvedUrl, setResolvedUrl] = useState<string>(() =>
     attachmentData && !attachmentData.startsWith('chunked:') ? attachmentData : ''
@@ -154,6 +157,7 @@ const MessageBubbleInner: React.FC<Props> = ({
 
   const longPressTimerRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const bubbleCardRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const hasImage = attachmentType === 'image' && Boolean(attachmentData);
@@ -239,18 +243,32 @@ const MessageBubbleInner: React.FC<Props> = ({
   };
 
   const handleDeleteAction = async () => {
-    if (!onDelete || deletingMsg) return;
+    if (!onDelete || deletingMsg || sandDissolving) return;
     if (!confirmingDelete) {
       setConfirmingDelete(true);
       return;
     }
     setDeletingMsg(true);
+    setPickerOpen(false);
+    setConfirmingDelete(false);
+
+    const prefersReduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (!prefersReduced && bubbleCardRef.current && onBeforeDeleteSand) {
+      const rect = bubbleCardRef.current.getBoundingClientRect();
+      setSandDissolving(true);
+      onBeforeDeleteSand(rect, isMe);
+      await new Promise((resolve) => window.setTimeout(resolve, 310));
+    }
+
     try {
       await onDelete();
-      setPickerOpen(false);
+    } catch {
+      setSandDissolving(false);
     } finally {
       setDeletingMsg(false);
-      setConfirmingDelete(false);
     }
   };
 
@@ -458,8 +476,9 @@ const MessageBubbleInner: React.FC<Props> = ({
       </AnimatePresence>
 
       <div className={`relative flex items-end gap-1.5 max-w-full ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
-        {/* Message Bubble (supports 420ms long-press on touch or mouse) */}
-        <div
+        {/* Message Bubble (supports 420ms long-press on touch or mouse + desert-sand wind dissolve on delete) */}
+        <motion.div
+          ref={bubbleCardRef}
           onPointerDown={startLongPress}
           onPointerUp={clearLongPress}
           onPointerCancel={clearLongPress}
@@ -468,18 +487,46 @@ const MessageBubbleInner: React.FC<Props> = ({
             e.preventDefault();
             setPickerOpen(true);
           }}
-          className={`relative overflow-hidden select-text max-w-[82vw] sm:max-w-md lg:max-w-lg rounded-2xl transition-all duration-200 ease-out active:scale-[0.985] ${
+          initial={false}
+          animate={
+            sandDissolving
+              ? {
+                  opacity: 0,
+                  x: 20,
+                  y: -4,
+                  scale: 0.96,
+                  clipPath: 'inset(0 0 0 100%)',
+                }
+              : {
+                  opacity: 1,
+                  x: 0,
+                  y: 0,
+                  scale: 1,
+                  clipPath: 'inset(0 0 0 0%)',
+                }
+          }
+          transition={{ duration: sandDissolving ? 0.34 : 0.16, ease: [0.32, 0, 0.67, 0] }}
+          className={`relative overflow-hidden select-text max-w-[82vw] sm:max-w-md lg:max-w-lg rounded-2xl transition-shadow duration-200 ease-out active:scale-[0.985] ${
             hasImage && !text && !replyToText ? 'p-1.5' : 'px-3.5 sm:px-4 py-2.5'
           } ${
             isMe
-              ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/20'
-              : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100'
+              ? 'bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-sm shadow-blue-600/20'
+              : 'bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 text-slate-900 dark:text-slate-100 shadow-2xs'
           } ${
             isActiveSearchMatch
               ? 'ring-2 ring-amber-400 dark:ring-amber-300 ring-offset-2 ring-offset-slate-50 dark:ring-offset-slate-950'
               : ''
           }`}
         >
+          {animateSend && !sandDissolving && (
+            <motion.span
+              aria-hidden="true"
+              initial={{ x: '-120%', opacity: 0.6 }}
+              animate={{ x: '160%', opacity: 0 }}
+              transition={{ duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
+              className="pointer-events-none absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-white/25 to-transparent -skew-x-12"
+            />
+          )}
           {replyToText && (
             <div
               className={`mb-1.5 pb-1.5 border-b text-xs truncate ${
@@ -738,7 +785,7 @@ const MessageBubbleInner: React.FC<Props> = ({
               );
             })()}
           </div>
-        </div>
+        </motion.div>
 
         {/* Inline Action Controls (mobile stays ultra-clean with quick react/menu dot; desktop shows full hover controls) */}
         <div className="flex items-center gap-0.5 opacity-75 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
@@ -823,11 +870,11 @@ const MessageBubbleInner: React.FC<Props> = ({
         data-msg-id={id}
         initial={
           animateSend
-            ? { opacity: 0, y: 12, scale: 0.96 }
-            : { opacity: 0, y: 8, x: -10, scale: 0.97 }
+            ? { opacity: 0, y: 18, x: 10, scale: 0.91 }
+            : { opacity: 0, y: 10, x: -12, scale: 0.95 }
         }
         animate={{ opacity: 1, y: 0, x: 0, scale: 1 }}
-        transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ type: 'spring', stiffness: 420, damping: 26, mass: 0.85 }}
         className={`group relative flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
       >
         {bubbleBody}

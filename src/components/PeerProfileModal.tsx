@@ -111,14 +111,18 @@ export const PeerProfileModal: React.FC<Props> = ({
 
   const trimmedEmail = emailInput.trim().toLowerCase();
   const isEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
-  const resolvedPeerHint = resolvePeerMaskedHint({
-    targetHint: chat.targetHint,
-    channel: chat.channel,
-    peerMaskedEmail: peerProfile?.maskedEmail,
-    peerEmail: savedPeerEmail || (isEmailValid ? trimmedEmail : ''),
-    viewerEmail,
-    lang,
-  });
+  const peerHidesGmail = peerProfile?.showGmail === false;
+  const resolvedPeerHint = peerHidesGmail
+    ? t(lang, 'gmailHiddenLabel')
+    : resolvePeerMaskedHint({
+        targetHint: chat.targetHint,
+        channel: chat.channel,
+        peerMaskedEmail: peerProfile?.maskedEmail,
+        peerEmail: savedPeerEmail || (isEmailValid ? trimmedEmail : ''),
+        peerShowGmail: peerProfile?.showGmail,
+        viewerEmail,
+        lang,
+      });
 
   const handleSaveEmail = () => {
     onSavePeerEmail(trimmedEmail);
@@ -199,7 +203,7 @@ export const PeerProfileModal: React.FC<Props> = ({
           </button>
         </div>
 
-        <div className="p-5 sm:p-6 space-y-5 overflow-y-auto">
+        <div className="flex-1 min-h-0 p-4 sm:p-6 space-y-5 overflow-y-auto">
           {/* Avatar with Blinking Green Online Ring + Audio/Video Call Quick Buttons */}
           <motion.div
             initial={{ opacity: 0, y: 8 }}

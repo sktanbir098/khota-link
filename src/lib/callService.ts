@@ -10,40 +10,77 @@ import {
   where,
 } from 'firebase/firestore';
 import { CallCandidate, CallMode, CallSession, CallStateStatus, LIMITS } from '../types/chat';
-import { db, handleFirestoreError, OperationType, sanitizeStr } from './firebase';
+import {
+  db,
+  handleFirestoreError,
+  logFirestoreError,
+  OperationType,
+  sanitizeStr,
+} from './firebase';
 
 export const CALL_RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    { urls: 'stun:stun.relay.metered.ca:80' },
+    { urls: 'stun:openrelay.metered.ca:80' },
     {
-      urls: 'turn:global.relay.metered.ca:80',
-      username: 'e8dd65b92f6110e8b12a022b',
-      credential: 'uWdWNmkhvyqTWxH+',
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
     },
     {
-      urls: 'turn:global.relay.metered.ca:80?transport=tcp',
-      username: 'e8dd65b92f6110e8b12a022b',
-      credential: 'uWdWNmkhvyqTWxH+',
+      urls: 'turn:openrelay.metered.ca:80?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
     },
     {
-      urls: 'turn:global.relay.metered.ca:443',
-      username: 'e8dd65b92f6110e8b12a022b',
-      credential: 'uWdWNmkhvyqTWxH+',
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
     },
     {
-      urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-      username: 'e8dd65b92f6110e8b12a022b',
-      credential: 'uWdWNmkhvyqTWxH+',
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
     },
   ],
   iceCandidatePoolSize: 6,
 };
+
+let dynamicIceServers: RTCIceServer[] | null = null;
+let lastIceFetchAt = 0;
+
+export async function warmRtcConfig(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if (dynamicIceServers && Date.now() - lastIceFetchAt < 5 * 60 * 1000) return;
+  try {
+    const resp = await fetch('/api/rtc-config');
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { iceServers?: RTCIceServer[] };
+    if (Array.isArray(data?.iceServers) && data.iceServers.length > 0) {
+      dynamicIceServers = data.iceServers;
+      lastIceFetchAt = Date.now();
+    }
+  } catch {
+    // Non-fatal; built-in STUN/TURN defaults remain active
+  }
+}
+
+export function getCallRtcConfig(): RTCConfiguration {
+  if (dynamicIceServers && dynamicIceServers.length > 0) {
+    return {
+      iceServers: dynamicIceServers,
+      iceCandidatePoolSize: 6,
+    };
+  }
+  return CALL_RTC_CONFIG;
+}
 
 export function generateCallId(): string {
   return doc(collection(db, 'calls')).id;
@@ -62,6 +99,9 @@ export async function createCallSession(params: {
   offerSdp: string;
 }): Promise<void> {
   const ref = doc(db, 'calls', params.callId);
+  if (!params.offerSdp || params.offerSdp.length > LIMITS.CALL_SDP_MAX) {
+    throw new Error('Call SDP offer exceeded size limit.');
+  }
   try {
     await setDoc(ref, {
       id: params.callId,
@@ -75,7 +115,7 @@ export async function createCallSession(params: {
       participantIds: [params.callerUid, params.calleeUid],
       mode: params.mode,
       status: 'ringing' as CallStateStatus,
-      offerSdp: sanitizeStr(params.offerSdp, LIMITS.CALL_SDP_MAX),
+      offerSdp: params.offerSdp,
       answerSdp: '',
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -90,9 +130,12 @@ export async function acceptCallSession(params: {
   answerSdp: string;
 }): Promise<void> {
   const ref = doc(db, 'calls', params.callId);
+  if (!params.answerSdp || params.answerSdp.length > LIMITS.CALL_SDP_MAX) {
+    throw new Error('Call SDP answer exceeded size limit.');
+  }
   try {
     await updateDoc(ref, {
-      answerSdp: sanitizeStr(params.answerSdp, LIMITS.CALL_SDP_MAX),
+      answerSdp: params.answerSdp,
       status: 'connected' as CallStateStatus,
       updatedAt: serverTimestamp(),
     });
@@ -121,13 +164,13 @@ export async function sendCallCandidate(params: {
   senderId: string;
   candidate: RTCIceCandidateInit;
 }): Promise<void> {
-  const candidateStr = sanitizeStr(JSON.stringify(params.candidate), LIMITS.CALL_CANDIDATE_MAX);
-  if (!candidateStr) return;
+  const raw = JSON.stringify(params.candidate);
+  if (!raw || raw.length > LIMITS.CALL_CANDIDATE_MAX) return;
   const candRef = doc(collection(db, 'calls', params.callId, 'candidates'));
   try {
     await setDoc(candRef, {
       senderId: params.senderId,
-      candidate: candidateStr,
+      candidate: raw,
       createdAt: serverTimestamp(),
     });
   } catch {
@@ -143,37 +186,55 @@ export function subscribeIncomingCalls(
     collection(db, 'calls'),
     where('participantIds', 'array-contains', currentUid)
   );
+  let initialResolved = false;
+  const liveAddedIds = new Set<string>();
+
   return onSnapshot(
     q,
     (snapshot) => {
       const now = Date.now();
+      if (initialResolved) {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added') {
+            liveAddedIds.add(change.doc.id);
+          }
+        });
+      } else {
+        initialResolved = true;
+      }
+
       const incoming = snapshot.docs
         .map((d) => d.data() as CallSession)
         .filter((c) => {
           if (c.calleeUid !== currentUid || c.status !== 'ringing') return false;
-          const createdMs = c.createdAt?.toMillis?.() ?? now;
-          return now - createdMs < 75_000;
+          // Any doc added live during this session is unconditionally fresh (avoids device clock skew!)
+          if (liveAddedIds.has(c.id)) return true;
+          const createdMs = c.createdAt?.toMillis?.();
+          if (!createdMs) return true;
+          return Math.abs(now - createdMs) < 180_000;
         })
         .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
       onIncoming(incoming);
     },
-    () => {
-      // Ignore transient call subscription errors
+    (err) => {
+      logFirestoreError(err, OperationType.LIST, 'calls');
     }
   );
 }
 
 export function subscribeCallSession(
   callId: string,
-  onSession: (session: CallSession | null) => void
+  onSession: (session: CallSession | null) => void,
+  onError?: (err: unknown) => void
 ): Unsubscribe {
   return onSnapshot(
     doc(db, 'calls', callId),
     (snap) => {
       onSession(snap.exists() ? (snap.data() as CallSession) : null);
     },
-    () => {
-      // Ignore transient snapshot errors on call end
+    (err) => {
+      logFirestoreError(err, OperationType.GET, `calls/${callId}`);
+      onError?.(err);
     }
   );
 }
@@ -181,7 +242,8 @@ export function subscribeCallSession(
 export function subscribeCallCandidates(
   callId: string,
   currentUid: string,
-  onCandidate: (candidate: RTCIceCandidateInit, candidateDocId: string) => void
+  onCandidate: (candidate: RTCIceCandidateInit, candidateDocId: string) => void,
+  onError?: (err: unknown) => void
 ): Unsubscribe {
   const seen = new Set<string>();
   return onSnapshot(
@@ -202,8 +264,9 @@ export function subscribeCallCandidates(
         }
       });
     },
-    () => {
-      // Ignore transient candidate listener errors
+    (err) => {
+      logFirestoreError(err, OperationType.LIST, `calls/${callId}/candidates`);
+      onError?.(err);
     }
   );
 }

@@ -59,16 +59,18 @@ service cloud.firestore {
           'onlineStatus', 'lastSeenAt', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'uid', 'displayName', 'photoUrl', 'bio', 'maskedEmail', 'hasPhone', 'showOnlineStatus',
-          'searchable', 'onlineStatus', 'lastSeenAt', 'createdAt', 'updatedAt'
+          'uid', 'displayName', 'photoUrl', 'bio', 'maskedEmail', 'hasPhone', 'showGmail',
+          'showOnlineStatus', 'onlineVisibility', 'searchable', 'onlineStatus', 'lastSeenAt', 'createdAt', 'updatedAt'
         ])
         && data.uid is string && data.uid == userId && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
-        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.photoUrl is string && data.photoUrl.size() <= 32000
         && data.bio is string && data.bio.size() <= 160
         && (!('maskedEmail' in data) || (data.maskedEmail is string && data.maskedEmail.size() <= 120))
         && data.hasPhone is bool
+        && (!('showGmail' in data) || data.showGmail is bool)
         && (!('showOnlineStatus' in data) || data.showOnlineStatus is bool)
+        && (!('onlineVisibility' in data) || data.onlineVisibility in ['everyone', 'contacts', 'nobody'])
         && (!('searchable' in data) || data.searchable is bool)
         && data.onlineStatus in ['online', 'away', 'offline']
         && data.lastSeenAt is timestamp
@@ -86,7 +88,7 @@ service cloud.firestore {
         && data.uid is string && data.uid == userId && isValidId(data.uid)
         && data.email is string && data.email.size() <= 120
         && data.phoneNumber is string && data.phoneNumber.size() <= 24 && data.phoneNumber.matches('^(\\+[0-9]{6,15})?$')
-        && data.language in ['en', 'bn']
+        && data.language in ['en', 'bn', 'hi', 'ar', 'es', 'fr', 'de', 'pt', 'zh', 'ja', 'ko', 'ru', 'tr', 'id', 'ur', 'it', 'th', 'vi']
         && (!('pinnedChatIds' in data) || (
           data.pinnedChatIds is list
           && data.pinnedChatIds.size() <= 50
@@ -117,7 +119,7 @@ service cloud.firestore {
         && data.keys().hasOnly(['uid', 'displayName', 'photoUrl', 'updatedAt'])
         && data.uid is string && data.uid == request.auth.uid && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
-        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.photoUrl is string && data.photoUrl.size() <= 32000
         && data.updatedAt is timestamp;
     }
 
@@ -132,7 +134,7 @@ service cloud.firestore {
         && data.prefix is string && data.prefix == prefix3 && isValidId(data.prefix)
         && data.prefix.size() >= 3 && data.prefix.size() <= 24
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
-        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.photoUrl is string && data.photoUrl.size() <= 32000
         && data.bio is string && data.bio.size() <= 160
         && data.maskedEmail is string && data.maskedEmail.size() <= 120
         && data.searchTerms is list
@@ -337,7 +339,7 @@ service cloud.firestore {
         && data.id is string && data.id == statusId && isValidId(data.id)
         && data.uid is string && data.uid == request.auth.uid && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
-        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.photoUrl is string && data.photoUrl.size() <= 32000
         && data.mediaType in ['text', 'image']
         && data.text is string && data.text.size() <= 300
         && data.bgGradient in ['blue', 'emerald', 'amber', 'rose', 'slate']
@@ -356,7 +358,7 @@ service cloud.firestore {
         && data.statusId is string && data.statusId == statusId && isValidId(data.statusId)
         && data.uid is string && data.uid == request.auth.uid && reactionId == request.auth.uid && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
-        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.photoUrl is string && data.photoUrl.size() <= 32000
         && data.emoji in ['❤️', '👍', '🔥', '😂', '😮', '😢']
         && data.updatedAt is timestamp;
     }
@@ -368,7 +370,7 @@ service cloud.firestore {
         && data.statusId is string && data.statusId == statusId && isValidId(data.statusId)
         && data.uid is string && data.uid == request.auth.uid && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
-        && data.photoUrl is string && data.photoUrl.size() <= 500
+        && data.photoUrl is string && data.photoUrl.size() <= 32000
         && data.text is string && data.text.size() >= 1 && data.text.size() <= 300
         && data.createdAt is timestamp;
     }
@@ -388,10 +390,10 @@ service cloud.firestore {
         && data.chatId is string && isValidId(data.chatId)
         && data.callerUid is string && isValidId(data.callerUid)
         && data.callerName is string && data.callerName.size() >= 1 && data.callerName.size() <= 80
-        && data.callerPhoto is string && data.callerPhoto.size() <= 500
+        && data.callerPhoto is string && data.callerPhoto.size() <= 32000
         && data.calleeUid is string && isValidId(data.calleeUid)
         && data.calleeName is string && data.calleeName.size() >= 1 && data.calleeName.size() <= 80
-        && data.calleePhoto is string && data.calleePhoto.size() <= 500
+        && data.calleePhoto is string && data.calleePhoto.size() <= 32000
         && data.callerUid != data.calleeUid
         && data.participantIds is list && data.participantIds.size() == 2
         && data.participantIds[0] is string && data.participantIds[1] is string
@@ -455,8 +457,8 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'displayName', 'photoUrl', 'bio', 'maskedEmail', 'hasPhone',
-            'showOnlineStatus', 'searchable', 'onlineStatus', 'lastSeenAt', 'updatedAt'
+            'displayName', 'photoUrl', 'bio', 'maskedEmail', 'hasPhone', 'showGmail',
+            'showOnlineStatus', 'onlineVisibility', 'searchable', 'onlineStatus', 'lastSeenAt', 'updatedAt'
           ])
         );
       allow delete: if isVerifiedUser() && isOwner(userId) && isValidId(userId);
